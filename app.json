@@ -1,30 +1,56 @@
 {
   "expo": {
-    "name": "DokanAI",
-    "slug": "DokanAI",
-    "version": "1.0.0",
+    "name": "দোকান AI",
+    "slug": "dokan-ai",
+    "version": "1.0.2",
     "orientation": "portrait",
     "icon": "./assets/icon.png",
     "userInterfaceStyle": "light",
+    "newArchEnabled": false,
     "splash": {
       "image": "./assets/splash-icon.png",
       "resizeMode": "contain",
-      "backgroundColor": "#ffffff"
-    },
-    "ios": {
-      "supportsTablet": true
+      "backgroundColor": "#1B4332"
     },
     "android": {
-      "adaptiveIcon": {
-        "backgroundColor": "#E6F4FE",
-        "foregroundImage": "./assets/android-icon-foreground.png",
-        "backgroundImage": "./assets/android-icon-background.png",
-        "monochromeImage": "./assets/android-icon-monochrome.png"
-      },
-      "predictiveBackGestureEnabled": false
+      "package": "com.dokanai.app",
+      "permissions": [
+        "RECORD_AUDIO",
+        "INTERNET",
+        "ACCESS_NETWORK_STATE",
+        "VIBRATE",
+        "CAMERA"
+      ]
     },
-    "web": {
-      "favicon": "./assets/favicon.png"
+    "web": { "bundler": "metro" },
+    "plugins": [
+      "expo-router",
+      "expo-secure-store",
+      [
+        "expo-av",
+        {
+          "microphonePermission": "ভয়েস এন্ট্রির জন্য মাইক্রোফোন দরকার"
+        }
+      ],
+      [
+        "expo-speech-recognition",
+        {
+          "microphonePermission": "ভয়েস কমান্ডের জন্য মাইক্রোফোন দরকার",
+          "speechRecognitionPermission": "ভয়েস থেকে টেক্সট কনভার্টের জন্য"
+        }
+      ],
+  [
+    "expo-camera",
+    {
+      "cameraPermission": "DokanAI পণ্যের বারকোড স্ক্যান করতে ক্যামেরা ব্যবহার করে"
+    }
+  ]
+    ],
+    "scheme": "dokanai",
+    "extra": {
+      "eas": {
+        "projectId": "44ae89a7-cfca-472c-9738-6e2779a21119"
+      }
     }
   }
 }

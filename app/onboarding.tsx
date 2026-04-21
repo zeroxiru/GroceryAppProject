@@ -1,4 +1,4 @@
-import React, { useState, useRef } from 'react';
+import React, { useState, useRef, useEffect } from 'react';
 import {
   View, Text, StyleSheet, TouchableOpacity,
   TextInput, Alert, ActivityIndicator, KeyboardAvoidingView,
@@ -9,9 +9,8 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
 import { COLORS, FONT_SIZES } from '@/constants';
 import { useAuthStore } from '@/store';
-import { db } from '@/services/supabase/client';
-import { Shop, ShopType, User } from '@/types';
-import { v4 as uuidv4 } from 'uuid';
+import { authApi } from '@/services/api/authApi';
+import { Shop, ShopType } from '@/types';
 
 type Screen = 'welcome' | 'login_phone' | 'register_phone' | 'verify_otp' | 'shop_setup' | 'shop_type' | 'set_pin';
 
@@ -36,6 +35,21 @@ export default function OnboardingScreen() {
   const [loading, setLoading] = useState(false);
   const [generatedOtp, setGeneratedOtp] = useState('');
   const [existingShop, setExistingShop] = useState<Shop | null>(null);
+  const [resendCountdown, setResendCountdown] = useState(0);
+  const countdownRef = useRef<ReturnType<typeof setInterval> | null>(null);
+
+  const startResendTimer = () => {
+    setResendCountdown(60);
+    if (countdownRef.current) clearInterval(countdownRef.current);
+    countdownRef.current = setInterval(() => {
+      setResendCountdown(prev => {
+        if (prev <= 1) { clearInterval(countdownRef.current!); return 0; }
+        return prev - 1;
+      });
+    }, 1000);
+  };
+
+  useEffect(() => () => { if (countdownRef.current) clearInterval(countdownRef.current); }, []);
 
   const otpRefs = useRef<(TextInput | null)[]>([]);
 
@@ -79,62 +93,50 @@ export default function OnboardingScreen() {
       Alert.alert('সতর্কতা', 'সঠিক মোবাইল নম্বর দিন (১১ ডিজিট)');
       return;
     }
+
+    if (isLogin) {
+      // Existing users log in with PIN — no OTP needed
+      router.replace('/pin-login');
+      return;
+    }
+
     setLoading(true);
     try {
-      const { data: shopData } = await db.shops()
-        .select('*')
-        .eq('phone', phone)
-        .maybeSingle();
-
-      if (isLogin && !shopData) {
-        Alert.alert('পাওয়া যায়নি', 'এই নম্বরে কোনো দোকান নেই। নতুন দোকান তৈরি করুন।');
-        return;
-      }
-      if (!isLogin && shopData) {
-        Alert.alert('আগে থেকে আছে', 'এই নম্বরে ইতিমধ্যে একটি দোকান আছে। লগইন করুন।');
-        return;
-      }
-
-      const otpCode = Math.floor(100000 + Math.random() * 900000).toString();
-      setGeneratedOtp(otpCode);
-      if (shopData) setExistingShop(shopData as Shop);
-
-      // Reset OTP boxes
+      await authApi.sendSignupOtp(phone);
       setOtpInputs(['', '', '', '', '', '']);
-
-      Alert.alert(
-        'OTP পাঠানো হয়েছে',
-        `আপনার OTP: ${otpCode}\n\n(প্রোডাকশনে SMS-এ আসবে)`,
-        [{ text: 'ঠিক আছে', onPress: () => {
-          setScreen('verify_otp');
-          setTimeout(() => otpRefs.current[0]?.focus(), 500);
-        }}]
-      );
+      startResendTimer();
+      setScreen('verify_otp');
+      setTimeout(() => otpRefs.current[0]?.focus(), 300);
     } catch (e: any) {
-      Alert.alert('ত্রুটি', e.message);
+      Alert.alert('ত্রুটি', e.message ?? 'OTP পাঠাতে সমস্যা হয়েছে');
     } finally {
       setLoading(false);
     }
   };
 
-  const handleVerifyOTP = async () => {
+  const handleResendOTP = async () => {
+    if (resendCountdown > 0 || loading) return;
+    setLoading(true);
+    try {
+      await authApi.sendSignupOtp(phone);
+      setOtpInputs(['', '', '', '', '', '']);
+      startResendTimer();
+      otpRefs.current[0]?.focus();
+      Alert.alert('পাঠানো হয়েছে', 'নতুন OTP পাঠানো হয়েছে।');
+    } catch (e: any) {
+      Alert.alert('ত্রুটি', e.message ?? 'OTP পাঠাতে সমস্যা হয়েছে');
+    } finally { setLoading(false); }
+  };
+
+  const handleVerifyOTP = () => {
     const enteredOtp = getOtpValue();
     if (enteredOtp.length !== 6) {
       Alert.alert('সতর্কতা', '৬ সংখ্যার OTP দিন');
       return;
     }
-    if (enteredOtp !== generatedOtp) {
-      Alert.alert('ভুল OTP', 'সঠিক OTP দিন। আবার চেষ্টা করুন।');
-      setOtpInputs(['', '', '', '', '', '']);
-      setTimeout(() => otpRefs.current[0]?.focus(), 300);
-      return;
-    }
-    if (existingShop) {
-      useAuthStore.getState().setShop(existingShop);
-      router.replace('/pin-login');
-    } else {
-      setScreen('shop_setup');
-    }
+    // OTP stored here; consumed server-side at verifySignup
+    setGeneratedOtp(enteredOtp);
+    setScreen('shop_setup');
   };
 
   const handleShopSetup = () => {
@@ -164,44 +166,22 @@ export default function OnboardingScreen() {
     }
     setLoading(true);
     try {
-      const shopId = uuidv4();
-      const userId = uuidv4();
-
-      const { data: shopData, error: shopError } = await db.shops()
-        .insert({
-          id: shopId,
-          name: shopName,
-          owner_name: ownerName,
-          phone,
-          email: email || null,
-          address: address || null,
-          shop_type: shopType,
-          is_verified: true,
-        })
-        .select()
-        .single();
-
-      if (shopError) throw new Error(shopError.message);
-
-      const { data: userData, error: userError } = await db.users()
-        .insert({
-          id: userId,
-          shop_id: shopId,
-          name: ownerName,
-          phone,
-          pin,
-          role: 'owner',
-        })
-        .select()
-        .single();
-
-      if (userError) throw new Error(userError.message);
-
-      useAuthStore.getState().setShop(shopData as Shop);
-      useAuthStore.getState().setUser(userData as User);
+      const res = await authApi.verifySignup({
+        phone,
+        otp: generatedOtp,
+        pin,
+        shopName,
+        ownerName,
+        address: address || undefined,
+        shopType: shopType ?? 'grocery',
+      });
+      await authApi.saveTokens(res);
+      useAuthStore.getState().setShop(res.shop);
+      useAuthStore.getState().setUser(res.user);
+      useAuthStore.getState().setTokens(res.accessToken, res.refreshToken);
       router.replace('/(tabs)/home');
     } catch (e: any) {
-      Alert.alert('ত্রুটি', e.message);
+      Alert.alert('ত্রুটি', e.message ?? 'রেজিস্ট্রেশন ব্যর্থ হয়েছে');
     } finally {
       setLoading(false);
     }
@@ -261,8 +241,14 @@ export default function OnboardingScreen() {
             <Text style={styles.formSubtitle}>দোকানের রেজিস্টার করা নম্বর দিন</Text>
             <View style={styles.card}>
               <FormInput label="মোবাইল নম্বর *" placeholder="01XXXXXXXXX" value={phone} onChangeText={setPhone} keyboardType="phone-pad" icon="call-outline" maxLength={11} />
+              <View style={{ backgroundColor: '#EFF6FF', borderRadius: 10, padding: 12, flexDirection: 'row', alignItems: 'center', gap: 8 }}>
+                <Ionicons name="information-circle-outline" size={16} color="#1E40AF" />
+                <Text style={{ flex: 1, fontSize: FONT_SIZES.xs, color: '#1E40AF', lineHeight: 18 }}>
+                  রেজিস্টার করা নম্বর দিন। PIN দিয়ে প্রবেশ করবেন।
+                </Text>
+              </View>
               <TouchableOpacity style={[styles.primaryBtn, loading && { opacity: 0.6 }]} onPress={() => handleSendOTP(true)} disabled={loading}>
-                {loading ? <ActivityIndicator color={COLORS.surface} /> : <Text style={styles.primaryBtnText}>OTP পাঠান →</Text>}
+                {loading ? <ActivityIndicator color={COLORS.surface} /> : <Text style={styles.primaryBtnText}>PIN দিয়ে প্রবেশ করুন →</Text>}
               </TouchableOpacity>
             </View>
           </View>
@@ -293,14 +279,14 @@ export default function OnboardingScreen() {
         {/* OTP Verify */}
         {screen === 'verify_otp' && (
           <View style={{ flex: 1 }}>
-            <TouchableOpacity style={styles.backBtn} onPress={() => setScreen(existingShop ? 'login_phone' : 'register_phone')}>
+            <TouchableOpacity style={styles.backBtn} onPress={() => setScreen('register_phone')}>
               <Ionicons name="arrow-back" size={22} color={COLORS.surface} />
             </TouchableOpacity>
             <Text style={styles.formTitle}>OTP যাচাই</Text>
             <Text style={styles.formSubtitle}>{phone} নম্বরে পাঠানো ৬ সংখ্যার কোড দিন</Text>
             <View style={[styles.card, { padding: 24, gap: 20 }]}>
 
-              {/* OTP boxes — each is a separate TextInput */}
+              {/* OTP boxes */}
               <View style={styles.otpRow}>
                 {otpInputs.map((digit, index) => (
                   <TextInput
@@ -327,14 +313,23 @@ export default function OnboardingScreen() {
                 <Text style={styles.primaryBtnText}>যাচাই করুন ✓</Text>
               </TouchableOpacity>
 
-              <TouchableOpacity
-                style={{ alignItems: 'center' }}
-                onPress={() => handleSendOTP(!!existingShop)}
-              >
-                <Text style={{ color: COLORS.primary, fontSize: FONT_SIZES.sm, fontWeight: '600' }}>
-                  OTP পাননি? আবার পাঠান
+              {/* Resend with countdown */}
+              <View style={{ alignItems: 'center', gap: 4 }}>
+                {resendCountdown > 0 ? (
+                  <Text style={{ color: COLORS.textMuted, fontSize: FONT_SIZES.sm }}>
+                    পুনরায় পাঠাতে অপেক্ষা করুন ({resendCountdown}s)
+                  </Text>
+                ) : (
+                  <TouchableOpacity onPress={handleResendOTP} disabled={loading}>
+                    <Text style={{ color: COLORS.primary, fontSize: FONT_SIZES.sm, fontWeight: '600' }}>
+                      {loading ? 'পাঠানো হচ্ছে...' : 'OTP পাননি? আবার পাঠান'}
+                    </Text>
+                  </TouchableOpacity>
+                )}
+                <Text style={{ fontSize: FONT_SIZES.xs, color: COLORS.textMuted }}>
+                  SMS আসতে ১–২ মিনিট লাগতে পারে
                 </Text>
-              </TouchableOpacity>
+              </View>
             </View>
           </View>
         )}

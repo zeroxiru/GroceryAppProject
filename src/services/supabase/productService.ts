@@ -1,41 +1,29 @@
-import { db } from './client';
+import { productApi } from '../api/productApi';
 import { Product } from '../../types';
 import { useAuthStore, useProductStore } from '../../store';
+import { OfflineError } from '../api/client';
 import { v4 as uuidv4 } from 'uuid';
 
 export const productService = {
   async fetchProducts(): Promise<Product[]> {
-    const { shop } = useAuthStore.getState();
-    if (!shop) return [];
-
     const { products: cached, lastFetched } = useProductStore.getState();
 
-    // Use cache if fetched within last 30 minutes
     if (cached.length > 0 && lastFetched) {
       const age = Date.now() - new Date(lastFetched).getTime();
-      if (age < 5 * 60 * 1000) {
-        console.log('Using cached products:', cached.length);
-        return cached;
-      }
+      if (age < 5 * 60 * 1000) return cached;
     }
 
-    // Try to fetch fresh from Supabase
     try {
-      const { data, error } = await db.products()
-        .select('*')
-        .eq('shop_id', shop.id)
-        .eq('is_active', true)
-        .order('name_bangla');
-
-      if (error) throw error;
-
-      useProductStore.getState().setProducts(data as Product[]);
-      return data as Product[];
+      const products = await productApi.list();
+      useProductStore.getState().setProducts(products);
+      return products;
     } catch (e) {
-      console.warn('Offline — using cached products:', cached.length);
-      // Return cached products even if stale
-      if (cached.length > 0) return cached;
-      return [];
+      if (e instanceof OfflineError) {
+        console.warn('Offline — using cached products:', cached.length);
+        return cached.length > 0 ? cached : [];
+      }
+      console.warn('fetchProducts error:', e);
+      return cached.length > 0 ? cached : [];
     }
   },
 
@@ -48,36 +36,52 @@ export const productService = {
     const { shop } = useAuthStore.getState();
     if (!shop) throw new Error('Not authenticated');
 
-    const newProduct = {
+    const optimistic: Product = {
       id: uuidv4(),
       shop_id: shop.id,
       name_bangla: params.name_bangla,
       name_english: '',
       aliases: [],
-      unit: params.unit,
+      unit: params.unit as any,
       category: 'other',
       sale_price: params.sale_price,
       purchase_price: params.purchase_price ?? params.sale_price,
       current_stock: 0,
       min_stock_alert: 0,
       is_active: true,
+      updated_at: new Date().toISOString(),
     };
 
-    // Save to local store immediately (works offline)
+    // Save locally first (offline-first)
     const current = useProductStore.getState().products;
-    useProductStore.getState().setProducts([...current, newProduct as Product]);
+    useProductStore.getState().setProducts([...current, optimistic]);
 
-    // Try to sync to Supabase
     try {
-      const { data, error } = await db.products()
-        .insert(newProduct)
-        .select()
-        .single();
-      if (error) throw error;
-      return data as Product;
-    } catch {
-      console.warn('Offline — product saved locally only');
-      return newProduct as Product;
+      const created = await productApi.create({
+        shop_id: shop.id,
+        name_bangla: params.name_bangla,
+        name_english: '',
+        aliases: [],
+        unit: params.unit as any,
+        category: 'other',
+        sale_price: params.sale_price,
+        purchase_price: params.purchase_price ?? params.sale_price,
+        current_stock: 0,
+        min_stock_alert: 0,
+        is_active: true,
+      });
+      // Replace optimistic record with server record
+      const updated = useProductStore.getState().products.map(p =>
+        p.id === optimistic.id ? created : p
+      );
+      useProductStore.getState().setProducts(updated);
+      return created;
+    } catch (e) {
+      if (e instanceof OfflineError) {
+        console.warn('Offline — product saved locally only');
+        return optimistic;
+      }
+      throw e;
     }
   },
 };

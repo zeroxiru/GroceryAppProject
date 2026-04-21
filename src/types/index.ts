@@ -48,7 +48,10 @@ export interface Product {
   discount_percent?: number;
   created_at?: string;
   updated_at: string;
+  size?: string;
 }
+
+export type PaymentMethod = 'cash' | 'bkash' | 'nagad' | 'card' | 'credit';
 
 export interface Transaction {
   id: string;
@@ -62,13 +65,18 @@ export interface Transaction {
   unit: Unit;
   unit_price: number;
   total_amount: number;
-  notes?: string;
-  voice_raw_text?: string;
+  subtotal?: number;
+  net_total?: number;
+  discount_type?: 'percentage' | 'amount';
+  discount_value?: number;
+  discount_amount?: number;
   invoice_number?: string;
   customer_name?: string;
+  payment_method?: PaymentMethod;
+  notes?: string;
+  voided?: boolean;
   is_synced: boolean;
   created_at: string;
-  
 }
 
 export interface TransactionInput {
@@ -78,10 +86,16 @@ export interface TransactionInput {
   quantity: number;
   unit: Unit;
   unit_price: number;
+  payment_method?: PaymentMethod;
   notes?: string;
   voice_raw_text?: string;
   customer_name?: string;
   invoice_number?: string;
+  discount_type?: 'percentage' | 'amount';
+  discount_value?: number;
+  discount_amount?: number;
+  subtotal?: number;
+  net_total?: number;
 }
 
 export interface ParsedCommand {

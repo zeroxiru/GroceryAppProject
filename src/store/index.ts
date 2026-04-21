@@ -2,14 +2,18 @@
 import { create } from 'zustand';
 import { persist, createJSONStorage } from 'zustand/middleware';
 import AsyncStorage from '@react-native-async-storage/async-storage';
-import { Shop, User, Product, Transaction, VoiceStatus } from '../types';
+import { Shop, User, Product, Transaction, VoiceStatus, PaymentMethod } from '../types';
+import { BillingPayload } from '../services/api/billingApi';
 
 interface AuthStore {
   shop: Shop | null;
   user: User | null;
   isAuthenticated: boolean;
+  accessToken: string | null;
+  refreshToken: string | null;
   setShop: (shop: Shop) => void;
   setUser: (user: User) => void;
+  setTokens: (access: string, refresh: string) => void;
   logout: () => void;
 }
 
@@ -19,9 +23,12 @@ export const useAuthStore = create<AuthStore>()(
       shop: null,
       user: null,
       isAuthenticated: false,
+      accessToken: null,
+      refreshToken: null,
       setShop: (shop) => set({ shop }),
       setUser: (user) => set({ user, isAuthenticated: true }),
-      logout: () => set({ user: null, isAuthenticated: false }),
+      setTokens: (accessToken, refreshToken) => set({ accessToken, refreshToken }),
+      logout: () => set({ user: null, isAuthenticated: false, shop: null, accessToken: null, refreshToken: null }),
     }),
     { name: 'dokan-auth', storage: createJSONStorage(() => AsyncStorage) }
   )
@@ -56,29 +63,32 @@ export const useProductStore = create<ProductStore>()(
 
 interface TransactionStore {
   todayTransactions: Transaction[];
-  pendingSync: Transaction[];
+  pendingBills: BillingPayload[];
   setTodayTransactions: (txns: Transaction[]) => void;
-  addTransaction: (txn: Transaction) => void;
-  addPendingSync: (txn: Transaction) => void;
-  clearPendingSync: () => void;
+  addTransactions: (txns: Transaction[]) => void;
+  addPendingBill: (bill: BillingPayload) => void;
+  clearPendingBills: () => void;
 }
 
 export const useTransactionStore = create<TransactionStore>()(
   persist(
     (set) => ({
       todayTransactions: [],
-      pendingSync: [],
+      pendingBills: [],
       setTodayTransactions: (todayTransactions) => set({ todayTransactions }),
-      addTransaction: (txn) => set((s) => ({
-        todayTransactions: [txn, ...s.todayTransactions],
+      addTransactions: (txns) => set((s) => ({
+        todayTransactions: [...txns, ...s.todayTransactions],
       })),
-      addPendingSync: (txn) => set((s) => ({
-        pendingSync: [...s.pendingSync, txn],
+      addPendingBill: (bill) => set((s) => ({
+        pendingBills: [...s.pendingBills, bill],
       })),
-      clearPendingSync: () => set({ pendingSync: [] }),
+      clearPendingBills: () => set({ pendingBills: [] }),
     }),
-    { name: 'dokan-transactions', storage: createJSONStorage(() => AsyncStorage),
-      partialize: (s) => ({ pendingSync: s.pendingSync }) }
+    {
+      name: 'dokan-transactions',
+      storage: createJSONStorage(() => AsyncStorage),
+      partialize: (s) => ({ pendingBills: s.pendingBills }),
+    }
   )
 );
 
@@ -101,12 +111,3 @@ export const useVoiceStore = create<VoiceStore>((set) => ({
   setConfirmationText: (confirmationText) => set({ confirmationText }),
   reset: () => set({ status: 'idle', rawText: '', confirmationText: '' }),
 }));
-
-interface AuthStore {
-  shop: Shop | null;
-  user: User | null;
-  isAuthenticated: boolean;
-  setShop: (shop: Shop) => void;
-  setUser: (user: User) => void;
-  logout: () => void;
-}

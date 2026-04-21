@@ -11,12 +11,21 @@ import { createNLUService } from '@/services/nlu/nluService';
 import { MultiItemParser } from '@/services/nlu/multiItemParser';
 import { transactionService } from '@/services/supabase/transactionService';
 import { productService } from '@/services/supabase/productService';
+import type { PaymentMethod } from '@/types';
 import { useAuthStore, useProductStore, useTransactionStore, useVoiceStore } from '@/store';
 import { ParsedCommand, Transaction, SaleItem } from '@/types';
 import { COLORS, FONT_SIZES } from '@/constants';
 import { formatCurrency, formatTime } from '@/utils';
 import { format } from 'date-fns';
 import { router, useLocalSearchParams } from 'expo-router';
+
+const PAYMENT_METHODS: { key: PaymentMethod; label: string; icon: string; activeColor: string }[] = [
+  { key: 'cash',   label: 'নগদ',   icon: '💵', activeColor: '#16a34a' },
+  { key: 'bkash',  label: 'bKash',  icon: '📱', activeColor: '#E2136E' },
+  { key: 'nagad',  label: 'Nagad',  icon: '🔥', activeColor: '#F7941D' },
+  { key: 'card',   label: 'Card',   icon: '💳', activeColor: '#2563EB' },
+  { key: 'credit', label: 'বাকি',  icon: '📝', activeColor: '#7C3AED' },
+];
 
 let ExpoSpeechRecognitionModule: any = null;
 let useSpeechRecognitionEvent: any = (_event: string, _cb: any) => {};
@@ -47,7 +56,17 @@ export default function HomeScreen() {
   const [draftVisible, setDraftVisible] = useState(false);
   const [customerName, setCustomerName] = useState('');
   const [invoiceModalVisible, setInvoiceModalVisible] = useState(false);
-  const [lastInvoice, setLastInvoice] = useState<{ number: string; items: SaleItem[]; total: number; customer: string } | null>(null);
+ const [lastInvoice, setLastInvoice] = useState<{
+  number: string;
+  items: SaleItem[];
+  total: number;
+  customer: string;
+  payment_method: PaymentMethod;
+  discount_type?: 'percentage' | 'amount';
+  discount_value?: number;
+  discount_amount?: number;
+  net_total?: number;
+} | null>(null);
   const [newProductModal, setNewProductModal] = useState(false);
   const [pendingProductName, setPendingProductName] = useState('');
   const [pendingProductPrice, setPendingProductPrice] = useState('');
@@ -65,6 +84,9 @@ export default function HomeScreen() {
   const [quickCategory, setQuickCategory] = useState<string | null>(null);
   const [topProducts, setTopProducts] = useState<Record<string, any[]>>({});
   const params = useLocalSearchParams();
+  const [discountType, setDiscountType] = useState<'percentage' | 'amount' | null>(null);
+  const [discountValue, setDiscountValue] = useState('');
+  const [paymentMethod, setPaymentMethod] = useState<PaymentMethod>('cash');
 
   useSpeechRecognitionEvent('result', (event: any) => {
     const transcript = event.results[0]?.transcript ?? '';
@@ -198,44 +220,78 @@ export default function HomeScreen() {
 
  
 
-  const handleSaveDraft = async () => {
-    const itemsToSave = draftItems.filter(i => i.checked);
-    if (itemsToSave.length === 0) { Alert.alert('সতর্কতা', 'কমপক্ষে একটি পণ্য সিলেক্ট করুন'); return; }
-    setSaving(true);
-    const invoiceNum = `INV-${format(new Date(), 'yyyyMMdd')}-${Math.floor(1000 + Math.random() * 9000)}`;
-    try {
-      for (const item of itemsToSave) {
-       await transactionService.saveTransaction({
-  type: 'sale', product_id: item.product_id, product_name: item.product_name,
-  quantity: item.quantity, unit: item.unit, unit_price: item.unit_price,
-  customer_name: customerName,
-  invoice_number: invoiceNum,
-});
-      }
-      const total = itemsToSave.reduce((s, i) => s + i.total, 0);
-      setLastInvoice({ number: invoiceNum, items: itemsToSave, total, customer: customerName });
-      setDraftItems([]); setDraftVisible(false); setCustomerName('');
-      setInvoiceModalVisible(true);
-      await voiceService.speak(`বিল তৈরি হয়েছে। মোট ${Math.round(total)} টাকা।`);
-    } catch (e: any) { Alert.alert('ত্রুটি', e.message); }
-    finally { setSaving(false); }
-  };
+const handleSaveDraft = async () => {
+  const itemsToSave = draftItems.filter(i => i.checked);
+  if (itemsToSave.length === 0) {
+    Alert.alert('সতর্কতা', 'কমপক্ষে একটি পণ্য সিলেক্ট করুন');
+    return;
+  }
+  setSaving(true);
+  const subtotal = itemsToSave.reduce((s, i) => s + i.total, 0);
+  const discAmt = calculateDiscount(subtotal, discountType, parseFloat(discountValue) || 0);
+  const net = subtotal - discAmt;
+
+  try {
+    const res = await transactionService.saveBill({
+      items: itemsToSave.map(item => ({
+        product_id: item.product_id,
+        product_name: item.product_name,
+        quantity: item.quantity,
+        unit: item.unit,
+        unit_price: item.unit_price,
+      })),
+      customer_name: customerName || undefined,
+      payment_method: paymentMethod,
+      discount_type: discountType ?? undefined,
+      discount_value: parseFloat(discountValue) || 0,
+    });
+    setLastInvoice({
+      number: res.invoice_number,
+      items: itemsToSave,
+      total: subtotal,
+      customer: customerName,
+      payment_method: paymentMethod,
+      discount_type: discountType ?? undefined,
+      discount_value: parseFloat(discountValue) || 0,
+      discount_amount: discAmt,
+      net_total: net,
+    });
+    setDraftItems([]);
+    setDraftVisible(false);
+    setCustomerName('');
+    setDiscountType(null);
+    setDiscountValue('');
+    setPaymentMethod('cash');
+    setInvoiceModalVisible(true);
+    await voiceService.speak(`বিল তৈরি হয়েছে। মোট ${Math.round(net)} টাকা।`);
+  } catch (e: any) {
+    Alert.alert('ত্রুটি', e.message);
+  } finally { setSaving(false); }
+};
 
   const handleShareInvoice = async () => {
-    if (!lastInvoice) return;
-    const lines = [
-      `🏪 *${shop?.name}*`,
-      `📋 বিল নং: ${lastInvoice.number}`,
-      `📅 তারিখ: ${format(new Date(), 'dd/MM/yyyy HH:mm')}`,
-      lastInvoice.customer ? `👤 গ্রাহক: ${lastInvoice.customer}` : '',
-      `──────────────`,
-      ...lastInvoice.items.map((item, i) => `${i + 1}. ${item.product_name} — ${item.quantity}${item.unit} × ৳${item.unit_price} = ৳${item.total}`),
-      `──────────────`,
-      `💰 *মোট: ৳${Math.round(lastInvoice.total)}*`,
-      `\nধন্যবাদ! 🙏`,
-    ].filter(Boolean).join('\n');
-    await Share.share({ message: lines });
-  };
+  if (!lastInvoice) return;
+  const pmInfo = PAYMENT_METHODS.find(p => p.key === lastInvoice.payment_method);
+  const lines = [
+    `🏪 *${shop?.name}*`,
+    `📋 বিল নং: ${lastInvoice.number}`,
+    `📅 তারিখ: ${format(new Date(), 'dd/MM/yyyy HH:mm')}`,
+    lastInvoice.customer ? `👤 গ্রাহক: ${lastInvoice.customer}` : '',
+    pmInfo ? `${pmInfo.icon} পেমেন্ট: ${pmInfo.label}` : '',
+    `──────────────`,
+    ...lastInvoice.items.map((item, i) =>
+      `${i + 1}. ${item.product_name} — ${item.quantity}${item.unit} × ৳${item.unit_price} = ৳${item.total}`
+    ),
+    `──────────────`,
+    `উপমোট: ৳${Math.round(lastInvoice.total)}`,
+    lastInvoice.discount_amount
+      ? `ছাড়: -৳${Math.round(lastInvoice.discount_amount)}`
+      : '',
+    `💰 *মোট: ৳${Math.round(lastInvoice.net_total ?? lastInvoice.total)}*`,
+    `\nধন্যবাদ! 🙏`,
+  ].filter(Boolean).join('\n');
+  await Share.share({ message: lines });
+};
 
   const handleAddNewProduct = async () => {
     if (!pendingProductName || !pendingProductPrice) { Alert.alert('সতর্কতা', 'পণ্যের নাম ও দাম দিন'); return; }
@@ -327,7 +383,17 @@ const handleQuickAdd = (product: any) => {
   setDraftVisible(true);
   Toast.show({ type: 'success', text1: `✓ ${product.name_bangla} যোগ হয়েছে` });
 };
+const calculateDiscount = (total: number, type: 'percentage' | 'amount' | null, value: number): number => {
+  if (!type || !value || isNaN(value)) return 0;
+  if (type === 'percentage') {
+    const pct = Math.min(value, 100); // max 100%
+    return +(total * pct / 100).toFixed(2);
+  }
+  return Math.min(value, total); // discount cannot exceed total
+};
 
+const discountAmount = calculateDiscount(checkedTotal, discountType, parseFloat(discountValue) || 0);
+const netTotal = checkedTotal - discountAmount;
 
 
   return (
@@ -379,7 +445,17 @@ const handleQuickAdd = (product: any) => {
             {/* Title row */}
             <View style={styles.draftHeader}>
               <Text style={styles.draftTitle}>📋 ড্রাফট বিল ({draftItems.length} পণ্য)</Text>
-              <Text style={styles.draftTotal}>৳{Math.round(checkedTotal)}</Text>
+              <View style={{ alignItems: 'flex-end' }}>
+                  {discountAmount > 0 && (
+                    <Text style={{ fontSize: FONT_SIZES.xs, color: COLORS.textMuted, textDecorationLine: 'line-through' }}>
+                      ৳{Math.round(checkedTotal)}
+                    </Text>
+                  )}
+                  <Text style={styles.draftTotal}>৳{Math.round(netTotal)}</Text>
+                  {discountAmount > 0 && (
+                    <Text style={{ fontSize: 10, color: COLORS.error }}>-৳{Math.round(discountAmount)} ছাড়</Text>
+                  )}
+                </View>
             </View>
 
             {/* Item checklist */}
@@ -469,9 +545,95 @@ const handleQuickAdd = (product: any) => {
                   color={isRecording ? '#fff' : COLORS.primary}
                 />
                 <Text style={[styles.addMoreTxt, isRecording && { color: '#fff' }]}>
-                  {isRecording ? '🎙️ শুনছি... শেষে আবার ট্যাপ করুন' : voiceAvailable ? 'ট্যাপ করুন ও সব পণ্য বলুন' : 'পেন্সিলে ট্যাপ করে লিখুন'}
+                  {isRecording
+                    ? (shop?.shop_type === 'cosmetics' || shop?.shop_type === 'imported'
+                      ? '🎙️ Listening... say product name'
+                      : '🎙️ শুনছি... সব পণ্য বলুন')
+                    : voiceAvailable
+                    ? (shop?.shop_type === 'cosmetics' || shop?.shop_type === 'imported'
+                      ? 'Press & say product name in English'
+                      : 'চেপে ধরুন ও বলুন')
+                    : (shop?.shop_type === 'cosmetics' || shop?.shop_type === 'imported'
+                      ? 'Tap pencil to type product name'
+                      : 'পেন্সিলে ট্যাপ করে লিখুন')}
                 </Text>
               </TouchableOpacity>
+            </View>
+        {/* ── DISCOUNT ROW ── */}
+<View style={{ marginTop: 6 }}>
+  {/* Toggle buttons */}
+  <View style={{ flexDirection: 'row', gap: 8, marginBottom: 6 }}>
+    <TouchableOpacity
+      style={[styles.discountTypeBtn, discountType === 'percentage' && styles.discountTypeBtnActive]}
+      onPress={() => { setDiscountType('percentage'); setDiscountValue(''); }}
+    >
+      <Text style={[styles.discountTypeTxt, discountType === 'percentage' && { color: '#fff' }]}>
+        % ছাড়
+      </Text>
+    </TouchableOpacity>
+    <TouchableOpacity
+      style={[styles.discountTypeBtn, discountType === 'amount' && styles.discountTypeBtnActive]}
+      onPress={() => { setDiscountType('amount'); setDiscountValue(''); }}
+    >
+      <Text style={[styles.discountTypeTxt, discountType === 'amount' && { color: '#fff' }]}>
+        ৳ ছাড়
+      </Text>
+    </TouchableOpacity>
+    {discountType && (
+      <TouchableOpacity
+        style={[styles.discountTypeBtn, { borderColor: COLORS.error }]}
+        onPress={() => { setDiscountType(null); setDiscountValue(''); }}
+      >
+        <Text style={{ fontSize: FONT_SIZES.xs, color: COLORS.error }}>বাতিল</Text>
+      </TouchableOpacity>
+    )}
+  </View>
+
+  {/* Discount input */}
+  {discountType && (
+    <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
+      <TextInput
+        style={[styles.nameInput, { flex: 1 }]}
+        placeholder={discountType === 'percentage' ? '0 %' : '০ টাকা ছাড়'}
+        placeholderTextColor={COLORS.textMuted}
+        value={discountValue}
+        onChangeText={setDiscountValue}
+        keyboardType="numeric"
+      />
+      {/* Show calculated discount */}
+      {discountValue ? (
+        <View style={{ alignItems: 'flex-end' }}>
+          <Text style={{ fontSize: FONT_SIZES.xs, color: COLORS.textMuted }}>ছাড়</Text>
+          <Text style={{ fontSize: FONT_SIZES.sm, fontWeight: '700', color: COLORS.error }}>
+            -৳{calculateDiscount(checkedTotal, discountType, parseFloat(discountValue)).toFixed(0)}
+          </Text>
+          <Text style={{ fontSize: FONT_SIZES.sm, fontWeight: '700', color: COLORS.primary }}>
+            = ৳{(checkedTotal - calculateDiscount(checkedTotal, discountType, parseFloat(discountValue))).toFixed(0)}
+          </Text>
+        </View>
+      ) : null}
+    </View>
+  )}
+</View>
+
+            {/* ── Payment Method ── */}
+            <View style={{ flexDirection: 'row', gap: 6, marginTop: 8, marginBottom: 4 }}>
+              {PAYMENT_METHODS.map(({ key, label, icon, activeColor }) => (
+                <TouchableOpacity
+                  key={key}
+                  onPress={() => setPaymentMethod(key)}
+                  style={{
+                    flex: 1, paddingVertical: 7, borderRadius: 10, alignItems: 'center', gap: 2,
+                    backgroundColor: paymentMethod === key ? activeColor : COLORS.surfaceSecondary,
+                    borderWidth: 1.5, borderColor: paymentMethod === key ? activeColor : COLORS.border,
+                  }}
+                >
+                  <Text style={{ fontSize: 14 }}>{icon}</Text>
+                  <Text style={{ fontSize: 10, fontWeight: '700', color: paymentMethod === key ? '#fff' : COLORS.textSecondary }}>
+                    {label}
+                  </Text>
+                </TouchableOpacity>
+              ))}
             </View>
 
             {/* ── ROW B: গ্রাহকের নাম | বিল বোতাম ── */}
@@ -508,8 +670,9 @@ const handleQuickAdd = (product: any) => {
               <Ionicons name="mic-outline" size={52} color={COLORS.textMuted} />
               <Text style={{ color: COLORS.textMuted, fontSize: FONT_SIZES.md, fontWeight: '600' }}>এখনো কোনো এন্ট্রি নেই</Text>
               <Text style={{ color: COLORS.textMuted, fontSize: FONT_SIZES.sm, textAlign: 'center', lineHeight: 22, paddingHorizontal: 32 }}>
-                মাইক চেপে ধরুন ও বলুন:{'\n'}
-                "পিয়াজ ১ কেজি ৭০, ময়দা ২ কেজি ১৫০, তেল ৫ লিটার ৮৯০"
+                {shop?.shop_type === 'cosmetics' || shop?.shop_type === 'imported'
+                  ? `Scan barcode or type product name:\n"Vaseline 400ML 2pcs, Nivea Cream 1pc"`
+                  : `মাইক চেপে ধরুন ও বলুন:\n"পিয়াজ ১ কেজি ৭০, ময়দা ২ কেজি ১৫০"`}
               </Text>
             </View>
           ) : (
@@ -622,7 +785,9 @@ const handleQuickAdd = (product: any) => {
           <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', padding: 20, borderBottomWidth: 0.5, borderBottomColor: COLORS.border }}>
             <TouchableOpacity onPress={() => setTextModalVisible(false)}><Ionicons name="close" size={24} color={COLORS.text} /></TouchableOpacity>
             <Text style={{ fontSize: FONT_SIZES.lg, fontWeight: '700', color: COLORS.text }}>
-              {draftItems.length > 0 ? 'আরো পণ্য যোগ করুন' : 'এন্ট্রি লিখুন'}
+              {shop?.shop_type === 'cosmetics' || shop?.shop_type === 'imported'
+                  ? draftItems.length > 0 ? 'Add More Products' : 'Enter Products'
+                  : draftItems.length > 0 ? 'আরো পণ্য যোগ করুন' : 'এন্ট্রি লিখুন'}
             </Text>
             <View style={{ width: 24 }} />
           </View>
@@ -634,17 +799,33 @@ const handleQuickAdd = (product: any) => {
             )}
             <TextInput
               style={{ borderWidth: 1, borderColor: COLORS.border, borderRadius: 12, padding: 16, fontSize: FONT_SIZES.md, color: COLORS.text, minHeight: 100, backgroundColor: COLORS.surfaceSecondary, textAlignVertical: 'top' }}
-              placeholder="পিয়াজ ১ কেজি ৭০, ময়দা ২ কেজি ১৫০, তেল ৫ লিটার ৮৯০"
-              placeholderTextColor={COLORS.textMuted}
+              placeholder={
+              shop?.shop_type === 'cosmetics'
+                ? 'Vaseline 400ML 2pcs 960, Nivea Cream 200ML 350'
+                : shop?.shop_type === 'imported'
+                ? 'Cadbury 100g 3pcs 840, Indomie 85g 6pcs 480'
+                : 'পিয়াজ ১ কেজি ৭০, ময়দা ২ কেজি ১৫০, তেল ৫ লিটার ৮৯০'
+            }
+             placeholderTextColor={COLORS.textMuted}
               value={textInput} onChangeText={setTextInput} multiline autoFocus
             />
             <Text style={{ fontSize: FONT_SIZES.xs, color: COLORS.textMuted, fontWeight: '600' }}>উদাহরণ:</Text>
-            {[
-              'পিয়াজ ১ কেজি ৭০, ময়দা ২ কেজি ১৫০, তেল ৫ লিটার ৮৯০',
-              'Fresh মরিচ গুঁড়া 200g 45, রাধুনী হলুদ 200g 40',
-              'কোকাকোলা 1L 3টা 180, 7Up 250ml 6টা 120',
-              'চাল ২৫ কেজি ১৮৭৫, ডাল ৫ কেজি ৬৫০',
-            ].map((ex, i) => (
+             {(shop?.shop_type === 'cosmetics' ? [
+            'Vaseline Body Lotion 400ML 2 pieces 960',
+            'Nivea Soft Cream 200ML 1 piece 350',
+            'AOX Shampoo Tea Tree 400ML 3 pieces 2655',
+            'CeraVe Moisturizing Cream 340G 1 piece 1200',
+          ] : shop?.shop_type === 'imported' ? [
+            'Cadbury Dairy Milk 100g 3 pieces 840',
+            'Indomie Mi Goreng 85g 6 pieces 480',
+            'Ferrero Rocher T16 1 piece 1200',
+            'Shin Ramyun 120g 4 pieces 800',
+          ] : [
+            'পিয়াজ ১ কেজি ৭০, ময়দা ২ কেজি ১৫০, তেল ৫ লিটার ৮৯০',
+            'Fresh মরিচ গুঁড়া 200g 45, রাধুনী হলুদ 200g 40',
+            'কোকাকোলা 1L 3টা 180, 7Up 250ml 6টা 120',
+            'চাল ২৫ কেজি ১৮৭৫, ডাল ৫ কেজি ৬৫০',
+          ]).map((ex, i) => (
               <TouchableOpacity key={i} style={{ backgroundColor: COLORS.surfaceSecondary, padding: 10, borderRadius: 8, borderWidth: 0.5, borderColor: COLORS.border }} onPress={() => setTextInput(ex)}>
                 <Text style={{ fontSize: FONT_SIZES.sm, color: COLORS.textSecondary }}>{ex}</Text>
               </TouchableOpacity>
@@ -655,7 +836,9 @@ const handleQuickAdd = (product: any) => {
               disabled={!textInput.trim()}
             >
               <Text style={{ color: '#fff', fontSize: FONT_SIZES.md, fontWeight: '700' }}>
-                {draftItems.length > 0 ? 'যোগ করুন →' : 'প্রসেস করুন →'}
+                {shop?.shop_type === 'cosmetics' || shop?.shop_type === 'imported'
+                ? draftItems.length > 0 ? 'Add →' : 'Process →'
+                : draftItems.length > 0 ? 'যোগ করুন →' : 'প্রসেস করুন →'}
               </Text>
             </TouchableOpacity>
           </View>
@@ -737,7 +920,9 @@ const handleQuickAdd = (product: any) => {
       )}
 
       {[
-        { label: 'পণ্যের নাম', value: editName, set: setEditName, placeholder: 'পণ্যের নাম' },
+        { label: 'পণ্যের নাম', value: editName, set: setEditName, placeholder: shop?.shop_type === 'grocery'
+  ? 'পণ্যের নাম'
+  : 'Product name (e.g. Vaseline 400ML)', },
         { label: 'মূল্য (৳)', value: editPrice, set: setEditPrice, placeholder: '0', numeric: true },
       ].map((f, i) => (
         <View key={i} style={{ gap: 6 }}>
@@ -840,10 +1025,44 @@ const handleQuickAdd = (product: any) => {
                   </View>
                 ))}
               </View>
-              <View style={{ backgroundColor: COLORS.primary, borderRadius: 12, padding: 16, flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 }}>
-                <Text style={{ fontSize: FONT_SIZES.lg, fontWeight: '700', color: '#fff' }}>মোট</Text>
-                <Text style={{ fontSize: FONT_SIZES.xxl, fontWeight: '700', color: '#fff' }}>৳{Math.round(lastInvoice.total)}</Text>
-              </View>
+              <View style={{ backgroundColor: COLORS.surfaceSecondary, borderRadius: 12, padding: 14, marginBottom: 8, gap: 8 }}>
+  <View style={{ flexDirection: 'row', justifyContent: 'space-between' }}>
+    <Text style={{ fontSize: FONT_SIZES.sm, color: COLORS.textSecondary }}>সাব-টোটাল</Text>
+    <Text style={{ fontSize: FONT_SIZES.sm, color: COLORS.text }}>৳{Math.round(lastInvoice.total)}</Text>
+  </View>
+  {lastInvoice.discount_amount ? (
+    <View style={{ flexDirection: 'row', justifyContent: 'space-between' }}>
+      <Text style={{ fontSize: FONT_SIZES.sm, color: COLORS.error }}>
+        ছাড় {lastInvoice.discount_type === 'percentage'
+          ? `(${lastInvoice.discount_value}%)`
+          : '(fixed)'}
+      </Text>
+      <Text style={{ fontSize: FONT_SIZES.sm, color: COLORS.error, fontWeight: '700' }}>
+        -৳{Math.round(lastInvoice.discount_amount)}
+      </Text>
+    </View>
+  ) : null}
+</View>
+
+{(() => {
+  const pm = PAYMENT_METHODS.find(p => p.key === lastInvoice.payment_method);
+  return pm ? (
+    <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', backgroundColor: COLORS.surfaceSecondary, borderRadius: 10, paddingHorizontal: 14, paddingVertical: 10, marginBottom: 8 }}>
+      <Text style={{ fontSize: FONT_SIZES.sm, color: COLORS.textSecondary }}>পেমেন্ট</Text>
+      <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6, backgroundColor: pm.activeColor + '18', paddingHorizontal: 12, paddingVertical: 4, borderRadius: 20, borderWidth: 1, borderColor: pm.activeColor + '44' }}>
+        <Text style={{ fontSize: 16 }}>{pm.icon}</Text>
+        <Text style={{ fontSize: FONT_SIZES.sm, fontWeight: '700', color: pm.activeColor }}>{pm.label}</Text>
+      </View>
+    </View>
+  ) : null;
+})()}
+
+<View style={{ backgroundColor: COLORS.primary, borderRadius: 12, padding: 16, flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 }}>
+  <Text style={{ fontSize: FONT_SIZES.lg, fontWeight: '700', color: '#fff' }}>মোট</Text>
+  <Text style={{ fontSize: FONT_SIZES.xxl, fontWeight: '700', color: '#fff' }}>
+    ৳{Math.round(lastInvoice.net_total ?? lastInvoice.total)}
+  </Text>
+</View>
               <TouchableOpacity style={{ backgroundColor: '#25D366', borderRadius: 14, height: 52, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 8, marginBottom: 12 }} onPress={handleShareInvoice}>
                 <Ionicons name="logo-whatsapp" size={22} color="#fff" />
                 <Text style={{ color: '#fff', fontSize: FONT_SIZES.md, fontWeight: '700' }}>WhatsApp-এ পাঠান</Text>
@@ -1000,4 +1219,7 @@ const styles = StyleSheet.create({
   billMeta: { fontSize: 10, color: COLORS.textMuted, marginTop: 1 },
   billDetail: { fontSize: 10, color: COLORS.textSecondary, lineHeight: 16 },
   billAmt: { fontSize: 12, fontWeight: '700' },
+  discountTypeBtn: { paddingHorizontal: 14, paddingVertical: 8, borderRadius: 20, borderWidth: 1.5, borderColor: COLORS.border, backgroundColor: '#fff' },
+  discountTypeBtnActive: { backgroundColor: COLORS.primary, borderColor: COLORS.primary },
+  discountTypeTxt: { fontSize: FONT_SIZES.xs, color: COLORS.textSecondary, fontWeight: '600' },
 }) ;

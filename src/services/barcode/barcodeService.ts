@@ -1,64 +1,47 @@
-import { db, supabase } from '../supabase/client';
+import { productApi } from '../api/productApi';
 import { useAuthStore, useProductStore } from '../../store';
 import { Product, GlobalProduct } from '../../types';
+import { OfflineError } from '../api/client';
 import { v4 as uuidv4 } from 'uuid';
 
 export const barcodeService = {
 
-  // Main lookup — checks shop products first, then global
   async lookupBarcode(barcode: string): Promise<{
     product: Product | null;
     fromGlobal: boolean;
     globalProduct: GlobalProduct | null;
   }> {
-    const { shop } = useAuthStore.getState();
-    if (!shop) return { product: null, fromGlobal: false, globalProduct: null };
-
-    // Step 1: Check local cache first (offline support)
+    // Step 1: Check local cache (offline support)
     const cached = useProductStore.getState().products;
     const localMatch = cached.find(p => p.barcode === barcode);
     if (localMatch) {
       return { product: localMatch, fromGlobal: false, globalProduct: null };
     }
 
-    // Step 2: Search shop's own products in Supabase
+    // Step 2: Single API call replaces 3-tier Supabase lookup
     try {
-      const { data: shopProduct } = await db.products()
-        .select('*')
-        .eq('shop_id', shop.id)
-        .eq('barcode', barcode)
-        .single();
-
-      if (shopProduct) {
-        return { product: shopProduct as Product, fromGlobal: false, globalProduct: null };
+      const res = await productApi.barcodeLookup(barcode);
+      if (res.product) {
+        return { product: res.product, fromGlobal: false, globalProduct: null };
       }
-    } catch { /* not found, continue */ }
-
-    // Step 3: Search global products master table
-    try {
-     const { data: globalProduct } = await db.global_products()
-  .select('*')
-  .eq('barcode', barcode)
-  .single();
-
-      if (globalProduct) {
-        return { product: null, fromGlobal: true, globalProduct: globalProduct as GlobalProduct };
+      if (res.globalProduct) {
+        return { product: null, fromGlobal: true, globalProduct: res.globalProduct };
       }
-    } catch { /* not found */ }
-
-    return { product: null, fromGlobal: false, globalProduct: null };
+      return { product: null, fromGlobal: false, globalProduct: null };
+    } catch (e) {
+      if (e instanceof OfflineError) {
+        console.warn('Offline — barcode lookup unavailable');
+        return { product: null, fromGlobal: false, globalProduct: null };
+      }
+      throw e;
+    }
   },
 
-  // Create shop product from global product template
-  async createFromGlobal(
-    globalProduct: GlobalProduct,
-    salePrice: number
-  ): Promise<Product> {
+  async createFromGlobal(globalProduct: GlobalProduct, salePrice: number): Promise<Product> {
     const { shop } = useAuthStore.getState();
     if (!shop) throw new Error('Not authenticated');
 
-    const newProduct: Product = {
-      id: uuidv4(),
+    const productData = {
       shop_id: shop.id,
       name_bangla: globalProduct.name_bangla ?? globalProduct.name_english,
       name_english: globalProduct.name_english,
@@ -76,17 +59,28 @@ export const barcodeService = {
       mrp: globalProduct.standard_mrp,
     };
 
-    // Save locally first
+    // Optimistic local save
+    const optimistic: Product = {
+      id: uuidv4(),
+      updated_at: new Date().toISOString(),
+      ...productData,
+    };
     const current = useProductStore.getState().products;
-    useProductStore.getState().setProducts([...current, newProduct]);
+    useProductStore.getState().setProducts([...current, optimistic]);
 
-    // Sync to Supabase
     try {
-      await db.products().insert(newProduct);
+      const created = await productApi.create(productData);
+      const updated = useProductStore.getState().products.map(p =>
+        p.id === optimistic.id ? created : p
+      );
+      useProductStore.getState().setProducts(updated);
+      return created;
     } catch (e) {
-      console.warn('Offline — product saved locally');
+      if (e instanceof OfflineError) {
+        console.warn('Offline — product saved locally');
+        return optimistic;
+      }
+      throw e;
     }
-
-    return newProduct;
   },
 };

@@ -1,59 +1,65 @@
-import { db } from './client';
-import { Shop, User } from '../../types';
+import { authApi } from '../api/authApi';
 import { useAuthStore } from '../../store';
-import { v4 as uuidv4 } from 'uuid';
-
-function hashPin(pin: string): string { return pin; }
+import { Shop, User } from '../../types';
 
 export const authService = {
   async registerShop(params: {
-    shopName: string; ownerName: string; phone: string; address?: string; pin: string;
+    shopName: string;
+    ownerName: string;
+    phone: string;
+    address?: string;
+    pin: string;
+    shopType?: string;
   }): Promise<{ shop: Shop; user: User }> {
-    const { data: shopData, error: shopError } = await db.shops()
-      .insert({ id: uuidv4(), name: params.shopName, owner_name: params.ownerName, phone: params.phone, address: params.address })
-      .select().single();
-    if (shopError) throw new Error(shopError.message);
-    const shop = shopData as Shop;
-
-    const { data: userData, error: userError } = await db.users()
-      .insert({ id: uuidv4(), shop_id: shop.id, name: params.ownerName, phone: params.phone, pin: hashPin(params.pin), role: 'owner' })
-      .select().single();
-    if (userError) throw new Error(userError.message);
-    const user = userData as User;
-
-    useAuthStore.getState().setShop(shop);
-    useAuthStore.getState().setUser(user);
-    return { shop, user };
+    const res = await authApi.verifySignup({
+      phone: params.phone,
+      otp: '',
+      pin: params.pin,
+      shopName: params.shopName,
+      ownerName: params.ownerName,
+      address: params.address,
+      shopType: params.shopType ?? 'grocery',
+    });
+    await authApi.saveTokens(res);
+    useAuthStore.getState().setShop(res.shop);
+    useAuthStore.getState().setUser(res.user);
+    useAuthStore.getState().setTokens(res.accessToken, res.refreshToken);
+    return { shop: res.shop, user: res.user };
   },
 
   async findShopByPhone(phone: string): Promise<Shop | null> {
-    const { data, error } = await db.shops().select('*').eq('phone', phone).single();
-    if (error) return null;
-    return data as Shop;
+    try {
+      const { shop } = await authApi.getMe();
+      return shop;
+    } catch { return null; }
   },
 
   async getShopUsers(shopId: string): Promise<User[]> {
-    const { data, error } = await db.users().select('*').eq('shop_id', shopId).eq('is_active', true);
-    if (error) throw new Error(error.message);
-    return data as User[];
+    const { staffApi } = await import('../api/staffApi');
+    return staffApi.list();
   },
 
   async loginWithPin(user: User, pin: string): Promise<boolean> {
-    if (hashPin(pin) !== user.pin) return false;
-    await db.users().update({ last_login: new Date().toISOString() }).eq('id', user.id);
-    useAuthStore.getState().setUser(user);
-    return true;
+    try {
+      const shop = useAuthStore.getState().shop;
+      if (!shop) return false;
+      const res = user.role === 'owner'
+        ? await authApi.ownerLogin(shop.phone, pin)
+        : await authApi.staffLogin(user.phone ?? shop.phone, pin, shop.id);
+      await authApi.saveTokens(res);
+      useAuthStore.getState().setUser(res.user);
+      useAuthStore.getState().setTokens(res.accessToken, res.refreshToken);
+      return true;
+    } catch { return false; }
   },
 
   async addHelper(params: { name: string; phone?: string; pin: string }): Promise<User> {
-    const { shop } = useAuthStore.getState();
-    if (!shop) throw new Error('Not authenticated');
-    const { data, error } = await db.users()
-      .insert({ id: uuidv4(), shop_id: shop.id, name: params.name, phone: params.phone, pin: hashPin(params.pin), role: 'helper' })
-      .select().single();
-    if (error) throw new Error(error.message);
-    return data as User;
+    const { staffApi } = await import('../api/staffApi');
+    return staffApi.create({ name: params.name, phone: params.phone, pin: params.pin, role: 'helper' });
   },
 
-  logout() { useAuthStore.getState().logout(); },
+  logout() {
+    authApi.clearTokens();
+    useAuthStore.getState().logout();
+  },
 };

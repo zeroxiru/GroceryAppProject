@@ -2,38 +2,93 @@ import React, { useState, useEffect, useRef } from 'react';
 import {
   View, Text, StyleSheet, TouchableOpacity,
   Modal, Alert, ActivityIndicator, TextInput,
-  Vibration
+  Vibration, ScrollView,
 } from 'react-native';
 import { CameraView, Camera } from 'expo-camera';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
-import { router, useLocalSearchParams } from 'expo-router';
+import { router } from 'expo-router';
 import { COLORS, FONT_SIZES } from '@/constants';
-import { barcodeService } from '@/services/barcode/barcodeService';
-import { Product, GlobalProduct } from '@/types';
-import { useProductStore } from '@/store';
+import { useProductStore, useAuthStore } from '@/store';
+import { productApi } from '@/services/api/productApi';
+import { GlobalProduct } from '@/types';
+import { v4 as uuidv4 } from 'uuid';
+
+// Categories based on shop type
+const GROCERY_CATEGORIES = [
+  'grain', 'oil', 'spice', 'essential', 'vegetable',
+  'dairy', 'drink', 'snack', 'beverage', 'toiletry', 'other'
+];
+
+const COSMETICS_CATEGORIES = [
+  'Hair Care', 'Skin Care', 'Face Care', 'Body Care',
+  'Baby Care', 'Perfume', 'Makeup', 'Nail Care', 'Other'
+];
+
+const IMPORTED_CATEGORIES = [
+  'Chocolates', 'Instant Noodles', 'Snacks', 'Beverages',
+  'Cosmetics', 'Baby Food', 'Health', 'Other'
+];
+
+const ORIGIN_COUNTRIES = [
+  'Bangladesh', 'India', 'Thailand', 'China', 'USA',
+  'Germany', 'UK', 'Japan', 'South Korea', 'Indonesia',
+  'Malaysia', 'Singapore', 'Canada', 'Australia', 'Other'
+];
+
+interface FoundProduct {
+  id: string;
+  name: string;
+  brand?: string;
+  origin_country?: string;
+  unit: string;
+  sale_price: number;
+  barcode: string;
+  current_stock?: number;
+  expiry_date?: string;
+  mrp?: number;
+}
 
 export default function BarcodeScannerScreen() {
+  const { products, setProducts } = useProductStore();
+  const { shop } = useAuthStore();
+  const isCosmetics = shop?.shop_type === 'cosmetics' || shop?.shop_type === 'imported';
+
   const [hasPermission, setHasPermission] = useState<boolean | null>(null);
   const [torch, setTorch] = useState(false);
   const [scanning, setScanning] = useState(true);
   const [loading, setLoading] = useState(false);
 
-  // Product found state
-  const [foundProduct, setFoundProduct] = useState<Product | null>(null);
-  const [foundGlobal, setFoundGlobal] = useState<GlobalProduct | null>(null);
+  // Found product state
+  const [foundProduct, setFoundProduct] = useState<FoundProduct | null>(null);
   const [quantity, setQuantity] = useState(1);
   const [productModalVisible, setProductModalVisible] = useState(false);
 
-  // New product state (not found)
+  // New product form state
   const [notFoundBarcode, setNotFoundBarcode] = useState('');
   const [newProductModal, setNewProductModal] = useState(false);
+
+  // Basic fields
   const [newProductName, setNewProductName] = useState('');
   const [newProductPrice, setNewProductPrice] = useState('');
   const [newProductUnit, setNewProductUnit] = useState('piece');
 
-  const lastScanned = useRef<string>('');
+  // Stock fields
+  const [openingStock, setOpeningStock] = useState('0');
+  const [minStockAlert, setMinStockAlert] = useState('5');
+  const [purchasePrice, setPurchasePrice] = useState('');
+
+  // Cosmetics/Imported fields
+  const [productBrand, setProductBrand] = useState('');
+  const [productMRP, setProductMRP] = useState('');
+  const [productExpiry, setProductExpiry] = useState('');
+  const [productCategory, setProductCategory] = useState('');
+  const [productSize, setProductSize] = useState('');
+  const [productCountry, setProductCountry] = useState('');
+  const [showCountryPicker, setShowCountryPicker] = useState(false);
+
   const cooldownRef = useRef<boolean>(false);
+  const lastScanned = useRef<string>('');
 
   useEffect(() => {
     requestPermission();
@@ -45,37 +100,78 @@ export default function BarcodeScannerScreen() {
   };
 
   const handleBarcodeScan = async ({ data }: { type: string; data: string }) => {
-    // Prevent duplicate scans
     if (cooldownRef.current || !scanning || data === lastScanned.current) return;
     cooldownRef.current = true;
     lastScanned.current = data;
     setScanning(false);
     setLoading(true);
-
-    // Vibrate on scan
     Vibration.vibrate(100);
 
     try {
-      const result = await barcodeService.lookupBarcode(data);
-
-      if (result.product) {
-        // Found in shop products
-        setFoundProduct(result.product);
+      // Step 1: Check local cache
+      const localMatch = products.find(p => (p as any).barcode === data);
+      if (localMatch) {
+        setFoundProduct({
+          id: localMatch.id,
+          name: localMatch.name_bangla || (localMatch as any).name_english || '',
+          brand: (localMatch as any).brand,
+          unit: localMatch.unit,
+          sale_price: localMatch.sale_price,
+          barcode: data,
+          current_stock: localMatch.current_stock,
+          mrp: (localMatch as any).mrp,
+        });
         setQuantity(1);
         setProductModalVisible(true);
-      } else if (result.globalProduct) {
-        // Found in global products
-        setFoundGlobal(result.globalProduct);
-        setQuantity(1);
-        setProductModalVisible(true);
-      } else {
-        // Not found anywhere
-        setNotFoundBarcode(data);
-        setNewProductModal(true);
+        return;
       }
+
+      // Step 2: Single API call replaces 3-tier Supabase lookup
+      const res = await productApi.barcodeLookup(data);
+
+      if (res.product) {
+        const p = res.product;
+        setFoundProduct({
+          id: p.id,
+          name: p.name_bangla || (p as any).name_english || '',
+          brand: (p as any).brand,
+          unit: p.unit,
+          sale_price: p.sale_price,
+          barcode: data,
+          current_stock: p.current_stock,
+          mrp: (p as any).mrp,
+        });
+        setQuantity(1);
+        setProductModalVisible(true);
+        return;
+      }
+
+      if (res.globalProduct) {
+        const g = res.globalProduct;
+        setFoundProduct({
+          id: g.id,
+          name: g.name_english,
+          brand: g.brand,
+          origin_country: g.origin_country,
+          unit: g.unit,
+          sale_price: g.standard_price || g.standard_mrp,
+          barcode: data,
+          mrp: g.standard_mrp,
+        });
+        setQuantity(1);
+        setProductModalVisible(true);
+        return;
+      }
+
+      // Step 4: Not found — open add form
+      setNotFoundBarcode(data);
+      setProductCategory(isCosmetics ? 'Skin Care' : 'other');
+      setNewProductModal(true);
+
     } catch (e) {
-      Alert.alert('ত্রুটি', 'স্ক্যান করতে সমস্যা হয়েছে');
-      resumeScanning();
+      console.warn('Barcode lookup error:', e);
+      setNotFoundBarcode(data);
+      setNewProductModal(true);
     } finally {
       setLoading(false);
     }
@@ -84,68 +180,112 @@ export default function BarcodeScannerScreen() {
   const resumeScanning = () => {
     setScanning(true);
     setFoundProduct(null);
-    setFoundGlobal(null);
     setProductModalVisible(false);
     setNewProductModal(false);
+    resetForm();
     setTimeout(() => {
       cooldownRef.current = false;
       lastScanned.current = '';
     }, 1500);
   };
 
-  const handleAddTobill = () => {
-    const product = foundProduct ?? (foundGlobal ? {
-      id: foundGlobal.id,
-      name_bangla: foundGlobal.name_bangla ?? foundGlobal.name_english,
-      name_english: foundGlobal.name_english,
-      unit: foundGlobal.unit as any,
-      sale_price: foundGlobal.standard_price || foundGlobal.standard_mrp,
-      barcode: foundGlobal.barcode,
-      brand: foundGlobal.brand,
-      origin_country: foundGlobal.origin_country,
-    } as any : null);
+  const resetForm = () => {
+    setNewProductName('');
+    setNewProductPrice('');
+    setNewProductUnit('piece');
+    setOpeningStock('0');
+    setMinStockAlert('5');
+    setPurchasePrice('');
+    setProductBrand('');
+    setProductMRP('');
+    setProductExpiry('');
+    setProductCategory('');
+    setProductSize('');
+    setProductCountry('');
+  };
 
-    if (!product) return;
-
-    const draftItem = {
-      product_name: product.name_bangla || product.name_english || '',
-      product_id: product.id,
+  const handleAddToBill = () => {
+    if (!foundProduct) return;
+    const item = {
+      product_name: foundProduct.name,
+      product_id: foundProduct.id,
       quantity,
-      unit: product.unit,
-      unit_price: product.sale_price,
-      total: +(quantity * product.sale_price).toFixed(2),
+      unit: foundProduct.unit,
+      unit_price: foundProduct.sale_price,
+      total: +(quantity * foundProduct.sale_price).toFixed(2),
       checked: true,
       confidence: 1.0,
     };
-
-    // Pass back to home screen via router params
     router.back();
-    // Use global event or params to pass item
-    router.setParams({ scannedItem: JSON.stringify(draftItem) });
+    router.setParams({ scannedItem: JSON.stringify(item) });
   };
 
   const handleSaveNewProduct = async () => {
-    if (!newProductName || !newProductPrice) {
-      Alert.alert('সতর্কতা', 'পণ্যের নাম ও দাম দিন');
+    if (!newProductName.trim()) {
+      Alert.alert('সতর্কতা', 'পণ্যের নাম দিন');
+      return;
+    }
+    if (!newProductPrice.trim()) {
+      Alert.alert('সতর্কতা', 'বিক্রয় মূল্য দিন');
       return;
     }
     setLoading(true);
     try {
-      const price = parseFloat(newProductPrice);
-      // Create minimal product
-      const fakeGlobal: GlobalProduct = {
-        id: notFoundBarcode,
-        barcode: notFoundBarcode,
+      const salePrice = parseFloat(newProductPrice) || 0;
+      const costPrice = parseFloat(purchasePrice) || salePrice;
+      const mrp = parseFloat(productMRP) || salePrice;
+      const stock = parseFloat(openingStock) || 0;
+      const minAlert = parseFloat(minStockAlert) || 5;
+
+      const newProduct = {
+        id: uuidv4(),
+        shop_id: shop?.id,
+        name_bangla: newProductName,
         name_english: newProductName,
-        category: 'other',
+        aliases: productBrand ? [productBrand.toLowerCase()] : [],
         unit: newProductUnit,
-        standard_mrp: price,
-        standard_price: price,
+        category: productCategory || 'other',
+        sale_price: salePrice,
+        purchase_price: costPrice,
+        current_stock: stock,
+        min_stock_alert: minAlert,
+        is_active: true,
+        barcode: notFoundBarcode,
+        brand: productBrand || null,
+        origin_country: productCountry || null,
+        expiry_date: productExpiry || null,
+        mrp: mrp,
+        size: productSize || null,
       };
-      const product = await barcodeService.createFromGlobal(fakeGlobal, price);
-      setFoundProduct(product);
+
+      // Save to local store immediately
+      setProducts([...products, newProduct as any]);
+
+      // Sync to backend
+      try {
+        const created = await productApi.create(newProduct);
+        setProducts(prev => prev.map((p: any) => p.id === newProduct.id ? created : p));
+      } catch {
+        console.warn('Offline — saved locally');
+      }
+
+      // Add to bill
+      const item = {
+        product_name: newProductName,
+        product_id: newProduct.id,
+        quantity: 1,
+        unit: newProductUnit,
+        unit_price: salePrice,
+        total: salePrice,
+        checked: true,
+        confidence: 1.0,
+      };
+
       setNewProductModal(false);
-      setProductModalVisible(true);
+      resetForm();
+      router.back();
+      router.setParams({ scannedItem: JSON.stringify(item) });
+
     } catch (e: any) {
       Alert.alert('ত্রুটি', e.message);
     } finally {
@@ -153,10 +293,15 @@ export default function BarcodeScannerScreen() {
     }
   };
 
-  // Permission denied
+  const categories = shop?.shop_type === 'cosmetics'
+    ? COSMETICS_CATEGORIES
+    : shop?.shop_type === 'imported'
+    ? IMPORTED_CATEGORIES
+    : GROCERY_CATEGORIES;
+
   if (hasPermission === false) {
     return (
-      <SafeAreaView style={[styles.container, { justifyContent: 'center', alignItems: 'center' }]}>
+      <SafeAreaView style={{ flex: 1, backgroundColor: COLORS.surface, justifyContent: 'center', alignItems: 'center' }}>
         <Ionicons name="camera-outline" size={64} color={COLORS.textMuted} />
         <Text style={{ color: COLORS.text, fontSize: FONT_SIZES.md, marginTop: 16, textAlign: 'center', paddingHorizontal: 32 }}>
           ক্যামেরা ব্যবহারের অনুমতি দিন
@@ -174,10 +319,9 @@ export default function BarcodeScannerScreen() {
     );
   }
 
-  // Loading permission
   if (hasPermission === null) {
     return (
-      <View style={[styles.container, { justifyContent: 'center', alignItems: 'center' }]}>
+      <View style={{ flex: 1, justifyContent: 'center', alignItems: 'center' }}>
         <ActivityIndicator color={COLORS.primary} size="large" />
       </View>
     );
@@ -196,29 +340,20 @@ export default function BarcodeScannerScreen() {
         }}
       />
 
-      {/* Dark overlay */}
+      {/* Overlay */}
       <View style={styles.overlay}>
-        {/* Top area */}
         <View style={styles.overlayTop} />
-
-        {/* Middle row */}
         <View style={{ flexDirection: 'row' }}>
           <View style={styles.overlaySide} />
-          {/* Focus box */}
           <View style={styles.focusBox}>
-            {/* Corner markers */}
             <View style={[styles.corner, styles.cornerTL]} />
             <View style={[styles.corner, styles.cornerTR]} />
             <View style={[styles.corner, styles.cornerBL]} />
             <View style={[styles.corner, styles.cornerBR]} />
-            {loading && (
-              <ActivityIndicator color={COLORS.primary} size="large" />
-            )}
+            {loading && <ActivityIndicator color={COLORS.primary} size="large" />}
           </View>
           <View style={styles.overlaySide} />
         </View>
-
-        {/* Bottom area */}
         <View style={styles.overlayBottom}>
           <Text style={styles.scanHint}>
             {loading ? 'খুঁজছি...' : 'পণ্যের বারকোড ক্যামেরার সামনে ধরুন'}
@@ -237,172 +372,304 @@ export default function BarcodeScannerScreen() {
         </TouchableOpacity>
       </SafeAreaView>
 
-      {/* Product Found Modal */}
-      <Modal
-        visible={productModalVisible}
-        animationType="slide"
-        presentationStyle="pageSheet"
-        onRequestClose={resumeScanning}
-      >
+      {/* ── PRODUCT FOUND MODAL ── */}
+      <Modal visible={productModalVisible} animationType="slide" presentationStyle="pageSheet" onRequestClose={resumeScanning}>
         <SafeAreaView style={{ flex: 1, backgroundColor: COLORS.surface }}>
-          <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', padding: 20, borderBottomWidth: 0.5, borderBottomColor: COLORS.border }}>
+          <View style={styles.modalHeader}>
             <TouchableOpacity onPress={resumeScanning}>
               <Ionicons name="close" size={24} color={COLORS.text} />
             </TouchableOpacity>
-            <Text style={{ fontSize: FONT_SIZES.lg, fontWeight: '700', color: COLORS.text }}>পণ্য পাওয়া গেছে ✓</Text>
+            <Text style={styles.modalTitle}>পণ্য পাওয়া গেছে ✓</Text>
             <View style={{ width: 24 }} />
           </View>
 
-          <View style={{ padding: 20, gap: 16 }}>
-            {/* Product Info */}
-            <View style={{ backgroundColor: '#F0FFF4', borderRadius: 12, padding: 16, borderWidth: 1, borderColor: COLORS.sale }}>
-              <Text style={{ fontSize: FONT_SIZES.lg, fontWeight: '700', color: COLORS.text }}>
-                {foundProduct?.name_bangla || foundProduct?.name_english || foundGlobal?.name_english}
-              </Text>
-              {(foundProduct?.brand || foundGlobal?.brand) && (
-                <Text style={{ fontSize: FONT_SIZES.sm, color: COLORS.textSecondary, marginTop: 4 }}>
-                  {foundProduct?.brand || foundGlobal?.brand}
-                  {(foundProduct?.origin_country || foundGlobal?.origin_country)
-                    ? ` • ${foundProduct?.origin_country || foundGlobal?.origin_country}`
-                    : ''}
+          <ScrollView contentContainerStyle={{ padding: 20, gap: 16 }}>
+            {/* Product info card */}
+            <View style={styles.productCard}>
+              <Text style={styles.productCardName}>{foundProduct?.name}</Text>
+              {foundProduct?.brand && (
+                <Text style={styles.productCardBrand}>
+                  {foundProduct.brand}
+                  {foundProduct.origin_country ? ` • ${foundProduct.origin_country}` : ''}
                 </Text>
               )}
-              <Text style={{ fontSize: FONT_SIZES.xl, fontWeight: '700', color: COLORS.primary, marginTop: 8 }}>
-                ৳{foundProduct?.sale_price || foundGlobal?.standard_price || foundGlobal?.standard_mrp}
-              </Text>
+              <View style={{ flexDirection: 'row', justifyContent: 'space-between', marginTop: 8 }}>
+                <View>
+                  <Text style={{ fontSize: 10, color: COLORS.textMuted }}>বিক্রয় মূল্য</Text>
+                  <Text style={styles.productCardPrice}>৳{foundProduct?.sale_price}</Text>
+                </View>
+                {foundProduct?.mrp && foundProduct.mrp !== foundProduct.sale_price && (
+                  <View style={{ alignItems: 'flex-end' }}>
+                    <Text style={{ fontSize: 10, color: COLORS.textMuted }}>MRP</Text>
+                    <Text style={{ fontSize: FONT_SIZES.sm, color: COLORS.textSecondary, textDecorationLine: 'line-through' }}>
+                      ৳{foundProduct.mrp}
+                    </Text>
+                  </View>
+                )}
+                {foundProduct?.current_stock !== undefined && (
+                  <View style={{ alignItems: 'flex-end' }}>
+                    <Text style={{ fontSize: 10, color: COLORS.textMuted }}>স্টক</Text>
+                    <Text style={{ fontSize: FONT_SIZES.sm, color: foundProduct.current_stock < 5 ? COLORS.error : COLORS.sale, fontWeight: '700' }}>
+                      {foundProduct.current_stock} {foundProduct.unit}
+                    </Text>
+                  </View>
+                )}
+              </View>
             </View>
 
-            {/* Quantity Selector */}
+            {/* Quantity selector */}
             <View>
-              <Text style={{ fontSize: FONT_SIZES.sm, fontWeight: '600', color: COLORS.text, marginBottom: 10 }}>
-                পরিমাণ
-              </Text>
-              {/* Quick buttons */}
+              <Text style={{ fontSize: FONT_SIZES.sm, fontWeight: '600', color: COLORS.text, marginBottom: 10 }}>পরিমাণ</Text>
               <View style={{ flexDirection: 'row', gap: 8, marginBottom: 12 }}>
                 {[1, 2, 3, 5, 10].map(q => (
                   <TouchableOpacity
                     key={q}
-                    style={[{
-                      flex: 1, height: 40, borderRadius: 8,
-                      borderWidth: 1.5, borderColor: COLORS.border,
-                      alignItems: 'center', justifyContent: 'center',
-                    }, quantity === q && { backgroundColor: COLORS.primary, borderColor: COLORS.primary }]}
+                    style={[styles.qtyQuickBtn, quantity === q && styles.qtyQuickBtnActive]}
                     onPress={() => setQuantity(q)}
                   >
-                    <Text style={[{ fontSize: FONT_SIZES.md, fontWeight: '700', color: COLORS.text }, quantity === q && { color: '#fff' }]}>{q}</Text>
+                    <Text style={[styles.qtyQuickTxt, quantity === q && { color: '#fff' }]}>{q}</Text>
                   </TouchableOpacity>
                 ))}
               </View>
-              {/* Manual input */}
               <View style={{ flexDirection: 'row', alignItems: 'center', gap: 12 }}>
-                <TouchableOpacity
-                  style={styles.qtyBtn}
-                  onPress={() => setQuantity(q => Math.max(1, q - 1))}
-                >
+                <TouchableOpacity style={styles.qtyBtn} onPress={() => setQuantity(q => Math.max(1, q - 1))}>
                   <Ionicons name="remove" size={20} color={COLORS.text} />
                 </TouchableOpacity>
-                <Text style={{ fontSize: FONT_SIZES.xl, fontWeight: '700', flex: 1, textAlign: 'center', color: COLORS.text }}>
-                  {quantity}
-                </Text>
-                <TouchableOpacity
-                  style={styles.qtyBtn}
-                  onPress={() => setQuantity(q => q + 1)}
-                >
+                <Text style={{ fontSize: FONT_SIZES.xl, fontWeight: '700', flex: 1, textAlign: 'center' }}>{quantity}</Text>
+                <TouchableOpacity style={styles.qtyBtn} onPress={() => setQuantity(q => q + 1)}>
                   <Ionicons name="add" size={20} color={COLORS.text} />
                 </TouchableOpacity>
               </View>
-
-              {/* Total */}
-              <View style={{ backgroundColor: COLORS.surfaceSecondary, borderRadius: 10, padding: 12, marginTop: 12, flexDirection: 'row', justifyContent: 'space-between' }}>
+              <View style={styles.totalRow}>
                 <Text style={{ fontSize: FONT_SIZES.sm, color: COLORS.textSecondary }}>
-                  {quantity} × ৳{foundProduct?.sale_price || foundGlobal?.standard_price}
+                  {quantity} × ৳{foundProduct?.sale_price}
                 </Text>
-                <Text style={{ fontSize: FONT_SIZES.md, fontWeight: '700', color: COLORS.primary }}>
-                  ৳{(quantity * (foundProduct?.sale_price || foundGlobal?.standard_price || 0)).toFixed(0)}
+                <Text style={{ fontSize: FONT_SIZES.lg, fontWeight: '700', color: COLORS.primary }}>
+                  ৳{((quantity) * (foundProduct?.sale_price ?? 0)).toFixed(0)}
                 </Text>
               </View>
             </View>
 
             {/* Action buttons */}
-            <View style={{ flexDirection: 'row', gap: 12, marginTop: 8 }}>
-              <TouchableOpacity
-                style={[styles.actionBtn, { backgroundColor: COLORS.surfaceSecondary, borderWidth: 1, borderColor: COLORS.border }]}
-                onPress={resumeScanning}
-              >
-                <Text style={{ fontSize: FONT_SIZES.md, color: COLORS.textSecondary, fontWeight: '600' }}>আবার স্ক্যান</Text>
+            <View style={{ flexDirection: 'row', gap: 12 }}>
+              <TouchableOpacity style={[styles.actionBtn, styles.actionBtnSecondary]} onPress={resumeScanning}>
+                <Text style={{ color: COLORS.textSecondary, fontWeight: '600' }}>আবার স্ক্যান</Text>
               </TouchableOpacity>
-              <TouchableOpacity
-                style={[styles.actionBtn, { backgroundColor: COLORS.primary }]}
-                onPress={handleAddTobill}
-              >
+              <TouchableOpacity style={[styles.actionBtn, { backgroundColor: COLORS.primary }]} onPress={handleAddToBill}>
                 <Ionicons name="checkmark" size={20} color="#fff" />
-                <Text style={{ fontSize: FONT_SIZES.md, color: '#fff', fontWeight: '700' }}>বিলে যোগ করুন</Text>
+                <Text style={{ color: '#fff', fontWeight: '700', fontSize: FONT_SIZES.md }}>বিলে যোগ করুন</Text>
               </TouchableOpacity>
             </View>
-          </View>
+          </ScrollView>
         </SafeAreaView>
       </Modal>
 
-      {/* Product Not Found Modal */}
-      <Modal
-        visible={newProductModal}
-        animationType="slide"
-        presentationStyle="pageSheet"
-        onRequestClose={resumeScanning}
-      >
+      {/* ── NEW PRODUCT MODAL ── */}
+      <Modal visible={newProductModal} animationType="slide" presentationStyle="pageSheet" onRequestClose={resumeScanning}>
         <SafeAreaView style={{ flex: 1, backgroundColor: COLORS.surface }}>
-          <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', padding: 20, borderBottomWidth: 0.5, borderBottomColor: COLORS.border }}>
+          <View style={styles.modalHeader}>
             <TouchableOpacity onPress={resumeScanning}>
               <Ionicons name="close" size={24} color={COLORS.text} />
             </TouchableOpacity>
-            <Text style={{ fontSize: FONT_SIZES.lg, fontWeight: '700', color: COLORS.text }}>নতুন পণ্য যোগ করুন</Text>
+            <Text style={styles.modalTitle}>নতুন পণ্য যোগ করুন</Text>
             <View style={{ width: 24 }} />
           </View>
-          <View style={{ padding: 20, gap: 16 }}>
-            <View style={{ backgroundColor: '#FEF3C7', padding: 12, borderRadius: 10 }}>
-              <Text style={{ fontSize: FONT_SIZES.xs, color: '#92400E', fontWeight: '600' }}>
-                বারকোড: {notFoundBarcode}
-              </Text>
-              <Text style={{ fontSize: FONT_SIZES.sm, color: '#92400E', marginTop: 4 }}>
-                এই পণ্য ডেটাবেজে নেই। নিচে তথ্য দিন।
-              </Text>
+
+          <ScrollView contentContainerStyle={{ padding: 20, gap: 14 }} showsVerticalScrollIndicator={false}>
+            {/* Barcode info */}
+            <View style={styles.barcodeInfoBox}>
+              <Ionicons name="barcode-outline" size={16} color="#92400E" />
+              <View style={{ flex: 1 }}>
+                <Text style={{ fontSize: FONT_SIZES.xs, color: '#92400E', fontWeight: '700' }}>
+                  বারকোড: {notFoundBarcode}
+                </Text>
+                <Text style={{ fontSize: FONT_SIZES.xs, color: '#92400E', marginTop: 2 }}>
+                  এই পণ্য ডেটাবেজে নেই। তথ্য দিয়ে যোগ করুন।
+                </Text>
+              </View>
             </View>
 
-            {[
-              { label: 'পণ্যের নাম *', value: newProductName, set: setNewProductName, placeholder: 'যেমন: Nivea Cream 200ML', numeric: false },
-              { label: 'বিক্রয় মূল্য (৳) *', value: newProductPrice, set: setNewProductPrice, placeholder: '0', numeric: true },
-            ].map((f, i) => (
-              <View key={i} style={{ gap: 6 }}>
-                <Text style={{ fontSize: FONT_SIZES.sm, fontWeight: '600', color: COLORS.text }}>{f.label}</Text>
+            {/* ── SECTION 1: Basic Info ── */}
+            <Text style={styles.sectionLabel}>📦 মূল তথ্য</Text>
+
+            <View style={styles.fieldGroup}>
+              <Text style={styles.fieldLabel}>পণ্যের নাম *</Text>
+              <TextInput
+                style={styles.input}
+                value={newProductName}
+                onChangeText={setNewProductName}
+                placeholder="যেমন: Vaseline Body Lotion 400ML"
+                placeholderTextColor={COLORS.textMuted}
+                autoFocus
+              />
+            </View>
+
+            {isCosmetics && (
+              <View style={styles.fieldGroup}>
+                <Text style={styles.fieldLabel}>ব্র্যান্ড</Text>
                 <TextInput
-                  style={{ borderWidth: 1, borderColor: COLORS.border, borderRadius: 10, height: 48, paddingHorizontal: 14, fontSize: FONT_SIZES.md, color: COLORS.text, backgroundColor: COLORS.surfaceSecondary }}
-                  value={f.value}
-                  onChangeText={f.set}
-                  placeholder={f.placeholder}
+                  style={styles.input}
+                  value={productBrand}
+                  onChangeText={setProductBrand}
+                  placeholder="যেমন: Vaseline, Nivea, AOX"
                   placeholderTextColor={COLORS.textMuted}
-                  keyboardType={f.numeric ? 'numeric' : 'default'}
                 />
               </View>
-            ))}
+            )}
 
-            <View style={{ gap: 6 }}>
-              <Text style={{ fontSize: FONT_SIZES.sm, fontWeight: '600', color: COLORS.text }}>একক</Text>
+            {isCosmetics && (
+              <View style={styles.fieldGroup}>
+                <Text style={styles.fieldLabel}>সাইজ / ভেরিয়েন্ট</Text>
+                <TextInput
+                  style={styles.input}
+                  value={productSize}
+                  onChangeText={setProductSize}
+                  placeholder="যেমন: 400ML, 200GM, 50ML"
+                  placeholderTextColor={COLORS.textMuted}
+                />
+              </View>
+            )}
+
+            {/* Unit selector */}
+            <View style={styles.fieldGroup}>
+              <Text style={styles.fieldLabel}>একক *</Text>
               <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 8 }}>
                 {['piece', 'kg', 'gram', 'litre', 'ml', 'dozen', 'packet'].map(u => (
                   <TouchableOpacity
                     key={u}
-                    style={[{ paddingHorizontal: 14, paddingVertical: 8, borderRadius: 20, borderWidth: 1, borderColor: COLORS.border }, newProductUnit === u && { backgroundColor: COLORS.primary, borderColor: COLORS.primary }]}
+                    style={[styles.unitBtn, newProductUnit === u && styles.unitBtnActive]}
                     onPress={() => setNewProductUnit(u)}
                   >
-                    <Text style={[{ fontSize: FONT_SIZES.sm, color: COLORS.textSecondary }, newProductUnit === u && { color: '#fff', fontWeight: '700' }]}>{u}</Text>
+                    <Text style={[styles.unitBtnTxt, newProductUnit === u && { color: '#fff', fontWeight: '700' }]}>{u}</Text>
                   </TouchableOpacity>
                 ))}
               </View>
             </View>
 
+            {/* ── SECTION 2: Pricing ── */}
+            <Text style={styles.sectionLabel}>💰 মূল্য তথ্য</Text>
+
             <View style={{ flexDirection: 'row', gap: 12 }}>
+              <View style={[styles.fieldGroup, { flex: 1 }]}>
+                <Text style={styles.fieldLabel}>বিক্রয় মূল্য (৳) *</Text>
+                <TextInput
+                  style={styles.input}
+                  value={newProductPrice}
+                  onChangeText={setNewProductPrice}
+                  placeholder="0"
+                  placeholderTextColor={COLORS.textMuted}
+                  keyboardType="numeric"
+                />
+              </View>
+              <View style={[styles.fieldGroup, { flex: 1 }]}>
+                <Text style={styles.fieldLabel}>ক্রয় মূল্য (৳)</Text>
+                <TextInput
+                  style={styles.input}
+                  value={purchasePrice}
+                  onChangeText={setPurchasePrice}
+                  placeholder="0"
+                  placeholderTextColor={COLORS.textMuted}
+                  keyboardType="numeric"
+                />
+              </View>
+            </View>
+
+            {isCosmetics && (
+              <View style={styles.fieldGroup}>
+                <Text style={styles.fieldLabel}>MRP (বোতলে ছাপা দাম)</Text>
+                <TextInput
+                  style={styles.input}
+                  value={productMRP}
+                  onChangeText={setProductMRP}
+                  placeholder="0"
+                  placeholderTextColor={COLORS.textMuted}
+                  keyboardType="numeric"
+                />
+              </View>
+            )}
+
+            {/* ── SECTION 3: Stock ── */}
+            <Text style={styles.sectionLabel}>📊 স্টক তথ্য</Text>
+
+            <View style={{ flexDirection: 'row', gap: 12 }}>
+              <View style={[styles.fieldGroup, { flex: 1 }]}>
+                <Text style={styles.fieldLabel}>বর্তমান স্টক</Text>
+                <TextInput
+                  style={styles.input}
+                  value={openingStock}
+                  onChangeText={setOpeningStock}
+                  placeholder="0"
+                  placeholderTextColor={COLORS.textMuted}
+                  keyboardType="numeric"
+                />
+              </View>
+              <View style={[styles.fieldGroup, { flex: 1 }]}>
+                <Text style={styles.fieldLabel}>সর্বনিম্ন স্টক এলার্ট</Text>
+                <TextInput
+                  style={styles.input}
+                  value={minStockAlert}
+                  onChangeText={setMinStockAlert}
+                  placeholder="5"
+                  placeholderTextColor={COLORS.textMuted}
+                  keyboardType="numeric"
+                />
+              </View>
+            </View>
+
+            {/* ── SECTION 4: Cosmetics Specific ── */}
+            {isCosmetics && (
+              <>
+                <Text style={styles.sectionLabel}>🌍 অতিরিক্ত তথ্য</Text>
+
+                {/* Category */}
+                <View style={styles.fieldGroup}>
+                  <Text style={styles.fieldLabel}>ক্যাটাগরি</Text>
+                  <ScrollView horizontal showsHorizontalScrollIndicator={false}>
+                    <View style={{ flexDirection: 'row', gap: 8 }}>
+                      {categories.map(cat => (
+                        <TouchableOpacity
+                          key={cat}
+                          style={[styles.catBtn, productCategory === cat && styles.catBtnActive]}
+                          onPress={() => setProductCategory(cat)}
+                        >
+                          <Text style={[styles.catBtnTxt, productCategory === cat && { color: '#fff' }]}>{cat}</Text>
+                        </TouchableOpacity>
+                      ))}
+                    </View>
+                  </ScrollView>
+                </View>
+
+                {/* Origin Country */}
+                <View style={styles.fieldGroup}>
+                  <Text style={styles.fieldLabel}>উৎপত্তি দেশ</Text>
+                  <TouchableOpacity
+                    style={[styles.input, { justifyContent: 'center' }]}
+                    onPress={() => setShowCountryPicker(true)}
+                  >
+                    <Text style={{ color: productCountry ? COLORS.text : COLORS.textMuted, fontSize: FONT_SIZES.md }}>
+                      {productCountry || 'দেশ বেছে নিন'}
+                    </Text>
+                  </TouchableOpacity>
+                </View>
+
+                {/* Expiry Date */}
+                <View style={styles.fieldGroup}>
+                  <Text style={styles.fieldLabel}>মেয়াদ শেষের তারিখ</Text>
+                  <TextInput
+                    style={styles.input}
+                    value={productExpiry}
+                    onChangeText={setProductExpiry}
+                    placeholder="Jan-2028 বা 31/01/2028"
+                    placeholderTextColor={COLORS.textMuted}
+                  />
+                </View>
+              </>
+            )}
+
+            {/* Save button */}
+            <View style={{ flexDirection: 'row', gap: 12, marginTop: 8 }}>
               <TouchableOpacity
-                style={[styles.actionBtn, { backgroundColor: COLORS.surfaceSecondary, borderWidth: 1, borderColor: COLORS.border }]}
+                style={[styles.actionBtn, styles.actionBtnSecondary]}
                 onPress={resumeScanning}
               >
                 <Text style={{ color: COLORS.textSecondary, fontWeight: '600' }}>বাতিল</Text>
@@ -414,10 +681,38 @@ export default function BarcodeScannerScreen() {
               >
                 {loading
                   ? <ActivityIndicator color="#fff" size="small" />
-                  : <Text style={{ color: '#fff', fontWeight: '700', fontSize: FONT_SIZES.md }}>যোগ করুন ✓</Text>}
+                  : <>
+                    <Ionicons name="checkmark-circle" size={18} color="#fff" />
+                    <Text style={{ color: '#fff', fontWeight: '700', fontSize: FONT_SIZES.md }}>যোগ করুন ✓</Text>
+                  </>}
               </TouchableOpacity>
             </View>
+          </ScrollView>
+        </SafeAreaView>
+      </Modal>
+
+      {/* Country Picker Modal */}
+      <Modal visible={showCountryPicker} animationType="slide" presentationStyle="pageSheet" onRequestClose={() => setShowCountryPicker(false)}>
+        <SafeAreaView style={{ flex: 1, backgroundColor: COLORS.surface }}>
+          <View style={styles.modalHeader}>
+            <TouchableOpacity onPress={() => setShowCountryPicker(false)}>
+              <Ionicons name="close" size={24} color={COLORS.text} />
+            </TouchableOpacity>
+            <Text style={styles.modalTitle}>দেশ বেছে নিন</Text>
+            <View style={{ width: 24 }} />
           </View>
+          <ScrollView>
+            {ORIGIN_COUNTRIES.map(country => (
+              <TouchableOpacity
+                key={country}
+                style={{ padding: 16, borderBottomWidth: 0.5, borderBottomColor: COLORS.border, flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' }}
+                onPress={() => { setProductCountry(country); setShowCountryPicker(false); }}
+              >
+                <Text style={{ fontSize: FONT_SIZES.md, color: COLORS.text }}>{country}</Text>
+                {productCountry === country && <Ionicons name="checkmark" size={20} color={COLORS.primary} />}
+              </TouchableOpacity>
+            ))}
+          </ScrollView>
         </SafeAreaView>
       </Modal>
     </View>
@@ -426,24 +721,46 @@ export default function BarcodeScannerScreen() {
 
 const FOCUS_WIDTH = 280;
 const FOCUS_HEIGHT = 180;
-const CORNER = 20;
+const CORNER = 24;
 
 const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: '#000' },
   overlay: { ...StyleSheet.absoluteFillObject },
-  overlayTop: { flex: 1, backgroundColor: 'rgba(0,0,0,0.6)' },
-  overlaySide: { flex: 1, backgroundColor: 'rgba(0,0,0,0.6)' },
-  overlayBottom: { flex: 2, backgroundColor: 'rgba(0,0,0,0.6)', alignItems: 'center', paddingTop: 20 },
+  overlayTop: { flex: 1, backgroundColor: 'rgba(0,0,0,0.65)' },
+  overlaySide: { flex: 1, backgroundColor: 'rgba(0,0,0,0.65)' },
+  overlayBottom: { flex: 2, backgroundColor: 'rgba(0,0,0,0.65)', alignItems: 'center', paddingTop: 24 },
   focusBox: { width: FOCUS_WIDTH, height: FOCUS_HEIGHT, alignItems: 'center', justifyContent: 'center' },
   corner: { position: 'absolute', width: CORNER, height: CORNER, borderColor: COLORS.primary, borderWidth: 3 },
   cornerTL: { top: 0, left: 0, borderRightWidth: 0, borderBottomWidth: 0 },
   cornerTR: { top: 0, right: 0, borderLeftWidth: 0, borderBottomWidth: 0 },
   cornerBL: { bottom: 0, left: 0, borderRightWidth: 0, borderTopWidth: 0 },
   cornerBR: { bottom: 0, right: 0, borderLeftWidth: 0, borderTopWidth: 0 },
-  scanHint: { color: '#fff', fontSize: FONT_SIZES.sm, textAlign: 'center', paddingHorizontal: 40 },
+  scanHint: { color: 'rgba(255,255,255,0.85)', fontSize: FONT_SIZES.sm, textAlign: 'center', paddingHorizontal: 40 },
   topBar: { position: 'absolute', top: 0, left: 0, right: 0, flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', paddingHorizontal: 16, paddingBottom: 12 },
   topBtn: { width: 40, height: 40, borderRadius: 20, backgroundColor: 'rgba(0,0,0,0.5)', alignItems: 'center', justifyContent: 'center' },
   topTitle: { fontSize: FONT_SIZES.md, fontWeight: '700', color: '#fff' },
+  modalHeader: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', padding: 20, borderBottomWidth: 0.5, borderBottomColor: COLORS.border },
+  modalTitle: { fontSize: FONT_SIZES.lg, fontWeight: '700', color: COLORS.text },
+  productCard: { backgroundColor: '#F0FFF4', borderRadius: 12, padding: 16, borderWidth: 1, borderColor: COLORS.sale },
+  productCardName: { fontSize: FONT_SIZES.lg, fontWeight: '700', color: COLORS.text },
+  productCardBrand: { fontSize: FONT_SIZES.sm, color: COLORS.textSecondary, marginTop: 4 },
+  productCardPrice: { fontSize: FONT_SIZES.xl, fontWeight: '700', color: COLORS.primary },
+  qtyQuickBtn: { flex: 1, height: 40, borderRadius: 8, borderWidth: 1.5, borderColor: COLORS.border, alignItems: 'center', justifyContent: 'center' },
+  qtyQuickBtnActive: { backgroundColor: COLORS.primary, borderColor: COLORS.primary },
+  qtyQuickTxt: { fontSize: FONT_SIZES.md, fontWeight: '700', color: COLORS.text },
   qtyBtn: { width: 44, height: 44, borderRadius: 22, backgroundColor: COLORS.surfaceSecondary, alignItems: 'center', justifyContent: 'center', borderWidth: 1, borderColor: COLORS.border },
+  totalRow: { backgroundColor: COLORS.surfaceSecondary, borderRadius: 10, padding: 12, marginTop: 12, flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' },
   actionBtn: { flex: 1, height: 52, borderRadius: 12, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 6 },
+  actionBtnSecondary: { backgroundColor: COLORS.surfaceSecondary, borderWidth: 1, borderColor: COLORS.border },
+  barcodeInfoBox: { backgroundColor: '#FEF3C7', padding: 12, borderRadius: 10, flexDirection: 'row', alignItems: 'flex-start', gap: 8 },
+  sectionLabel: { fontSize: FONT_SIZES.sm, fontWeight: '700', color: COLORS.textSecondary, marginTop: 4 },
+  fieldGroup: { gap: 6 },
+  fieldLabel: { fontSize: FONT_SIZES.sm, fontWeight: '600', color: COLORS.text },
+  input: { borderWidth: 1, borderColor: COLORS.border, borderRadius: 10, height: 48, paddingHorizontal: 14, fontSize: FONT_SIZES.md, color: COLORS.text, backgroundColor: COLORS.surfaceSecondary },
+  unitBtn: { paddingHorizontal: 14, paddingVertical: 8, borderRadius: 20, borderWidth: 1, borderColor: COLORS.border, backgroundColor: '#fff' },
+  unitBtnActive: { backgroundColor: COLORS.primary, borderColor: COLORS.primary },
+  unitBtnTxt: { fontSize: FONT_SIZES.sm, color: COLORS.textSecondary },
+  catBtn: { paddingHorizontal: 12, paddingVertical: 7, borderRadius: 20, borderWidth: 1, borderColor: COLORS.border, backgroundColor: '#fff' },
+  catBtnActive: { backgroundColor: COLORS.primary, borderColor: COLORS.primary },
+  catBtnTxt: { fontSize: FONT_SIZES.xs, color: COLORS.textSecondary },
 });

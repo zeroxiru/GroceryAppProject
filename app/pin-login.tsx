@@ -4,12 +4,13 @@ import { router } from 'expo-router';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
 import { authService } from '@/services/supabase/authService';
+import { authApi } from '@/services/api/authApi';
 import { useAuthStore } from '@/store';
 import { User } from '@/types';
 import { COLORS, FONT_SIZES } from '@/constants';
 
 export default function PinLoginScreen() {
-  const { shop } = useAuthStore();
+  const { shop, logout } = useAuthStore();
   const [users, setUsers] = useState<User[]>([]);
   const [selectedUser, setSelectedUser] = useState<User | null>(null);
   const [pin, setPin] = useState('');
@@ -26,10 +27,15 @@ export default function PinLoginScreen() {
   const handleShopLookup = async () => {
     setLookupLoading(true);
     try {
-      const foundShop = await authService.findShopByPhone(phoneInput);
-      if (!foundShop) { Alert.alert('পাওয়া যায়নি', 'এই নম্বরে কোনো দোকান নেই'); return; }
-      useAuthStore.getState().setShop(foundShop);
-      await loadUsers(foundShop.id);
+      // Try to validate phone against backend via login pre-check
+      // Just set the phone as shop identifier so PIN screen loads
+      if (phoneInput.length < 11) {
+        Alert.alert('সতর্কতা', 'সঠিক মোবাইল নম্বর দিন');
+        return;
+      }
+      // Store a minimal shop stub so the PIN screen renders
+      useAuthStore.getState().setShop({ id: '', name: '', phone: phoneInput } as any);
+      setUsers([{ id: 'owner', name: 'মালিক', role: 'owner', phone: phoneInput, pin: '', shop_id: '', is_active: true, created_at: '' }]);
     } catch (e: any) { Alert.alert('ত্রুটি', e.message); }
     finally { setLookupLoading(false); }
   };
@@ -41,9 +47,18 @@ export default function PinLoginScreen() {
     if (newPin.length === 4 && selectedUser) {
       setLoading(true);
       try {
-        const ok = await authService.loginWithPin(selectedUser, newPin);
-        if (ok) { router.replace('/(tabs)/home'); }
-        else { Alert.alert('ভুল PIN', 'আবার চেষ্টা করুন'); setPin(''); }
+        const phone = selectedUser.phone ?? shop?.phone ?? '';
+        const res = selectedUser.role === 'owner'
+          ? await authApi.ownerLogin(phone, newPin)
+          : await authApi.staffLogin(phone, newPin, shop?.id ?? '');
+        await authApi.saveTokens(res);
+        useAuthStore.getState().setShop(res.shop);
+        useAuthStore.getState().setUser(res.user);
+        useAuthStore.getState().setTokens(res.accessToken, res.refreshToken);
+        router.replace('/(tabs)/home');
+      } catch (e: any) {
+        Alert.alert('ভুল PIN', e.message ?? 'আবার চেষ্টা করুন');
+        setPin('');
       } finally { setLoading(false); }
     }
   };
@@ -73,6 +88,10 @@ export default function PinLoginScreen() {
       <View style={styles.shopHeader}>
         <View style={styles.shopIcon}><Ionicons name="storefront" size={28} color={COLORS.surface} /></View>
         <Text style={styles.shopName}>{shop.name}</Text>
+        <TouchableOpacity style={styles.changeShopBtn} onPress={() => { logout(); }}>
+          <Ionicons name="swap-horizontal" size={14} color="rgba(255,255,255,0.8)" />
+          <Text style={styles.changeShopText}>দোকান পরিবর্তন</Text>
+        </TouchableOpacity>
       </View>
 
       {!selectedUser ? (
@@ -125,6 +144,8 @@ export default function PinLoginScreen() {
 const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: COLORS.primary },
   shopHeader: { alignItems: 'center', paddingVertical: 24, gap: 8 },
+  changeShopBtn: { flexDirection: 'row', alignItems: 'center', gap: 4, paddingHorizontal: 12, paddingVertical: 6, borderRadius: 20, backgroundColor: 'rgba(255,255,255,0.15)', marginTop: 4 },
+  changeShopText: { fontSize: FONT_SIZES.xs, color: 'rgba(255,255,255,0.85)', fontWeight: '500' },
   shopIcon: { width: 60, height: 60, borderRadius: 30, backgroundColor: 'rgba(255,255,255,0.2)', alignItems: 'center', justifyContent: 'center' },
   shopName: { fontSize: FONT_SIZES.lg, fontWeight: '700', color: COLORS.surface, textAlign: 'center', paddingHorizontal: 20 },
   card: { flex: 1, backgroundColor: COLORS.surface, borderTopLeftRadius: 28, borderTopRightRadius: 28, padding: 24, alignItems: 'center' },

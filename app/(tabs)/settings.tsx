@@ -318,9 +318,7 @@ export default function SettingsScreen() {
           )}
         </Section>
 
-        <Text style={{ textAlign: 'center', fontSize: FONT_SIZES.xs, color: COLORS.textMuted, marginTop: 24 }}>
-          দোকান AI v1.0.0
-        </Text>
+        <AdminVersionTap isOwner={isOwner} />
       </ScrollView>
 
       <AddUserModal
@@ -479,6 +477,7 @@ function EditShopModal({ visible, shop, onClose, onSaved }: {
   const [ownerName, setOwnerName] = useState('');
   const [address, setAddress] = useState('');
   const [shopType, setShopType] = useState<ShopType>('grocery');
+  const [defaultDiscount, setDefaultDiscount] = useState('');
   const [saving, setSaving] = useState(false);
 
   useEffect(() => {
@@ -487,6 +486,7 @@ function EditShopModal({ visible, shop, onClose, onSaved }: {
       setOwnerName(shop.owner_name ?? '');
       setAddress(shop.address ?? '');
       setShopType(shop.shop_type ?? 'grocery');
+      setDefaultDiscount(shop.default_discount ? String(shop.default_discount) : '');
     }
   }, [visible, shop]);
 
@@ -499,6 +499,7 @@ function EditShopModal({ visible, shop, onClose, onSaved }: {
         owner_name: ownerName.trim() || undefined,
         address: address.trim() || undefined,
         shop_type: shopType,
+        default_discount: defaultDiscount ? parseFloat(defaultDiscount) : undefined,
       });
       Alert.alert('সম্পন্ন', 'দোকানের তথ্য আপডেট হয়েছে ✓');
       onSaved(updated);
@@ -527,9 +528,9 @@ function EditShopModal({ visible, shop, onClose, onSaved }: {
         <ScrollView contentContainerStyle={{ padding: 20, gap: 16 }}>
 
           {[
-            { label: 'দোকানের নাম *', value: name, set: setName, placeholder: 'বিক্রমপুর গ্রোসারী' },
-            { label: 'মালিকের নাম', value: ownerName, set: setOwnerName, placeholder: 'আপনার নাম' },
-            { label: 'ঠিকানা', value: address, set: setAddress, placeholder: 'দোকানের ঠিকানা' },
+            { label: 'দোকানের নাম *', value: name, set: setName, placeholder: 'বিক্রমপুর গ্রোসারী', numeric: false },
+            { label: 'মালিকের নাম', value: ownerName, set: setOwnerName, placeholder: 'আপনার নাম', numeric: false },
+            { label: 'ঠিকানা', value: address, set: setAddress, placeholder: 'দোকানের ঠিকানা', numeric: false },
           ].map((f, i) => (
             <View key={i} style={{ gap: 6 }}>
               <Text style={styles.fieldLabel}>{f.label}</Text>
@@ -542,6 +543,24 @@ function EditShopModal({ visible, shop, onClose, onSaved }: {
               />
             </View>
           ))}
+
+          {/* Default discount — cosmetics/imported only */}
+          {(shopType === 'cosmetics' || shopType === 'imported') && (
+            <View style={{ gap: 6 }}>
+              <Text style={styles.fieldLabel}>ডিফল্ট ছাড় (%) — MRP Auto-Discount</Text>
+              <TextInput
+                style={styles.modalInput}
+                value={defaultDiscount}
+                onChangeText={setDefaultDiscount}
+                placeholder="e.g. 10 (for 10% off MRP)"
+                placeholderTextColor={COLORS.textMuted}
+                keyboardType="numeric"
+              />
+              <Text style={{ fontSize: FONT_SIZES.xs, color: COLORS.textMuted }}>
+                নতুন পণ্য যোগ করলে বিক্রয় মূল্য স্বয়ংক্রিয়ভাবে MRP থেকে এই % বাদ দিয়ে সেট হবে।
+              </Text>
+            </View>
+          )}
 
           <View style={{ gap: 8 }}>
             <Text style={styles.fieldLabel}>দোকানের ধরন</Text>
@@ -580,6 +599,27 @@ function EditShopModal({ visible, shop, onClose, onSaved }: {
         </ScrollView>
       </SafeAreaView>
     </Modal>
+  );
+}
+
+function AdminVersionTap({ isOwner }: { isOwner: boolean }) {
+  const [taps, setTaps] = useState(0);
+
+  const handleTap = () => {
+    const next = taps + 1;
+    setTaps(next);
+    if (next >= 5) {
+      setTaps(0);
+      router.push('/admin');
+    }
+  };
+
+  return (
+    <TouchableOpacity onPress={handleTap} activeOpacity={1}>
+      <Text style={{ textAlign: 'center', fontSize: FONT_SIZES.xs, color: COLORS.textMuted, marginTop: 24, paddingBottom: 8 }}>
+        দোকান AI v1.0.0{taps > 0 && taps < 5 ? ` (${5 - taps} more taps)` : ''}
+      </Text>
+    </TouchableOpacity>
   );
 }
 

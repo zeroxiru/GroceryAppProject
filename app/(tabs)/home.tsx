@@ -19,6 +19,20 @@ import { formatCurrency, formatTime } from '@/utils';
 import { format } from 'date-fns';
 import { router, useLocalSearchParams } from 'expo-router';
 
+const GROCERY_CATEGORY_LABELS: Record<string, string> = {
+  drink:     '🥤 পানীয়',
+  beverage:  '🥤 পানীয়',
+  grain:     '🌾 চাল-ডাল',
+  oil:       '🫙 তেল',
+  vegetable: '🥦 সবজি',
+  snack:     '🍪 স্ন্যাকস',
+  toiletry:  '🧴 সাবান',
+  spice:     '🌶️ মসলা',
+  dairy:     '🥛 দুগ্ধ',
+  essential: '🛒 আবশ্যক',
+  other:     '📦 অন্যান্য',
+};
+
 const PAYMENT_METHODS: { key: PaymentMethod; label: string; icon: string; activeColor: string }[] = [
   { key: 'cash',   label: 'নগদ',   icon: '💵', activeColor: '#16a34a' },
   { key: 'bkash',  label: 'bKash',  icon: '📱', activeColor: '#E2136E' },
@@ -43,8 +57,8 @@ interface DraftItem extends SaleItem {
 
 export default function HomeScreen() {
   const { shop, user } = useAuthStore();
-  const { products } = useProductStore();
-  const { todayTransactions } = useTransactionStore();
+  const { products = [] } = useProductStore();
+  const { todayTransactions =[] } = useTransactionStore();
   const { status, setStatus, rawText, setRawText, reset } = useVoiceStore();
 
   const [saving, setSaving] = useState(false);
@@ -116,17 +130,15 @@ export default function HomeScreen() {
     multiParserRef.current = new MultiItemParser(nluRef.current);
   }, [products]);
 
- useEffect(() => {
-  // Clear yesterday's transactions from view
+useEffect(() => {
   const today = new Date().toDateString();
-  const localTxns = useTransactionStore.getState().todayTransactions;
-  const todayOnly = localTxns.filter(t =>
-    new Date(t.created_at).toDateString() === today
+  const localTxns = useTransactionStore.getState().todayTransactions ?? [];
+  const todayOnly = (localTxns|| []).filter(t =>
+    t?.created_at && new Date(t.created_at).toDateString() === today
   );
   if (todayOnly.length !== localTxns.length) {
     useTransactionStore.getState().setTodayTransactions(todayOnly);
   }
-  // Then fetch fresh from server
   transactionService.fetchTodayTransactions().catch(console.warn);
   productService.fetchProducts().catch(console.warn);
 }, []);
@@ -153,8 +165,8 @@ export default function HomeScreen() {
   }
 }, [params.scannedItem]);
 
-  const todaySales = todayTransactions.filter(t => t.type === 'sale').reduce((s, t) => s + t.total_amount, 0);
-  const todayPurchases = todayTransactions.filter(t => t.type === 'purchase').reduce((s, t) => s + t.total_amount, 0);
+  const todaySales = (todayTransactions ?? []).filter(t => t.type === 'sale').reduce((s, t) => s + (t?.total_amount ?? 0), 0);
+  const todayPurchases = (todayTransactions?? []).filter(t => t.type === 'purchase').reduce((s, t) => s + (t?.total_amount ?? 0), 0);
   const checkedTotal = draftItems.filter(i => i.checked).reduce((s, i) => s + i.total, 0);
 
   const appendToDraft = (newDrafts: DraftItem[]) => {
@@ -334,40 +346,43 @@ const handleSaveDraft = async () => {
 
 const getTopProductsForCategory = (category: string) => {
   // Get products for this category
-  const catProducts = products.filter(p => p.category === category);
+  const catProducts = products.filter(p => p?.category === category);
 
   // Sort by how many times sold today (from transactions)
   const salesCount: Record<string, number> = {};
   todayTransactions.forEach(t => {
-    salesCount[t.product_name] = (salesCount[t.product_name] ?? 0) + 1;
+    const name = t?.product_name;
+    if (name) salesCount[name] = (salesCount[name] ?? 0) + 1;
   });
 
   return catProducts
-    .sort((a, b) => (salesCount[b.name_bangla] ?? 0) - (salesCount[a.name_bangla] ?? 0))
+    .sort((a, b) => (salesCount[b?.name_bangla] ?? 0) - (salesCount[a?.name_bangla] ?? 0))
     .slice(0, 5);
 };
-const quickCategories = shop?.shop_type === 'cosmetics' ? [
+const quickCategories = (shop?.shop_type === 'cosmetics') ? [
   { key: 'Hair Care', label: '💆 শ্যাম্পু' },
   { key: 'Skin Care', label: '🧴 স্কিন কেয়ার' },
   { key: 'Face Care', label: '🫧 ফেস কেয়ার' },
   { key: 'Body Care', label: '🛁 বডি কেয়ার' },
   { key: 'Baby Care', label: '👶 বেবি' },
   { key: 'Perfume', label: '🌸 পারফিউম' },
-] : shop?.shop_type === 'imported' ? [
+] : (shop?.shop_type === 'imported') ? [
   { key: 'Chocolates', label: '🍫 চকলেট' },
   { key: 'Instant Noodles', label: '🍜 নুডলস' },
   { key: 'cosmetics', label: '🧴 কসমেটিক্স' },
   { key: 'Snacks', label: '🍪 স্ন্যাকস' },
-] : [
-  { key: 'drink', label: '🥤 পানীয়' },
-  { key: 'grain', label: '🌾 চাল-ডাল' },
-  { key: 'oil', label: '🫙 তেল' },
-  { key: 'vegetable', label: '🥦 সবজি' },
-  { key: 'snack', label: '🍪 স্ন্যাকস' },
-  { key: 'toiletry', label: '🧴 সাবান' },
-  { key: 'spice', label: '🌶️ মসলা' },
-  { key: 'dairy', label: '🥛 দুগ্ধ' },
-];
+] : (() => {
+  // Derive categories dynamically from loaded products (like web-POS)
+  const seen = new Set<string>();
+  const cats: { key: string; label: string }[] = [];
+  for (const p of products) {
+    if (p?.category && !seen.has(p.category)) {
+      seen.add(p.category);
+      cats.push({ key: p.category, label: GROCERY_CATEGORY_LABELS[p.category] ?? p.category });
+    }
+  }
+  return cats;
+})();
 const handleQuickAdd = (product: any) => {
   const item: DraftItem = {
     product_name: product.name_bangla,
@@ -664,8 +679,8 @@ const netTotal = checkedTotal - discountAmount;
 
         {/* Transaction history */}
         <ScrollView style={{ flex: 1, paddingHorizontal: 16 }} showsVerticalScrollIndicator={false}>
-          <Text style={styles.sectionTitle}>আজকের লেনদেন ({todayTransactions.length})</Text>
-          {todayTransactions.length === 0 ? (
+          <Text style={styles.sectionTitle}>আজকের লেনদেন ({(todayTransactions || []).length})</Text>
+          {(todayTransactions|| []).length === 0 ? (
             <View style={{ alignItems: 'center', paddingTop: 32, gap: 8 }}>
               <Ionicons name="mic-outline" size={52} color={COLORS.textMuted} />
               <Text style={{ color: COLORS.textMuted, fontSize: FONT_SIZES.md, fontWeight: '600' }}>এখনো কোনো এন্ট্রি নেই</Text>
@@ -1082,7 +1097,7 @@ function BillSummaryList({ transactions }: { transactions: Transaction[] }) {
   const seen = new Set<string>();
 
   transactions.forEach(txn => {
-    const key = (txn as any).invoice_number || txn.id;
+    const key = (txn as any).invoice_number ?? txn.id ?? String(Math.random());
     if (!seen.has(key)) {
       seen.add(key);
       const relatedItems = (txn as any).invoice_number

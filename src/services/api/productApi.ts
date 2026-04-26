@@ -13,10 +13,32 @@ export interface BarcodeResult {
   found: boolean;
 }
 
+export interface BulkImportRow {
+  name_bangla?: string;
+  name_english?: string;
+  brand?: string;
+  category?: string;
+  size?: string;
+  unit?: string;
+  sale_price?: number;
+  purchase_price?: number;
+  mrp?: number;
+  current_stock?: number;
+  min_stock_alert?: number;
+  barcode?: string;
+  origin_country?: string;
+  expiry_date?: string;
+}
+
+export interface BulkImportResult {
+  imported: number;
+  failed: number;
+  errors?: { row: number; message: string }[];
+}
+
 export const productApi = {
   async list(page = 1, limit = 200): Promise<Product[]> {
-    const res = await apiRequest<ProductListResponse>('GET', `/products?page=${page}&limit=${limit}`);
-    return res.products;
+    return apiRequest<Product[]>('GET', `/products?page=${page}&limit=${limit}`);
   },
 
   async search(q: string): Promise<Product[]> {
@@ -42,5 +64,9 @@ export const productApi = {
 
   async generateBarcode(id: string): Promise<{ barcode: string }> {
     return apiRequest<{ barcode: string }>('POST', `/products/${id}/generate-barcode`);
+  },
+
+  async bulkImport(products: BulkImportRow[]): Promise<BulkImportResult> {
+    return apiRequest<BulkImportResult>('POST', '/products/bulk-import', { products });
   },
 };

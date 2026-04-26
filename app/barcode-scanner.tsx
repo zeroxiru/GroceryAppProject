@@ -50,7 +50,7 @@ interface FoundProduct {
 }
 
 export default function BarcodeScannerScreen() {
-  const { products, setProducts } = useProductStore();
+  const { products = [], setProducts } = useProductStore();
   const { shop } = useAuthStore();
   const isCosmetics = shop?.shop_type === 'cosmetics' || shop?.shop_type === 'imported';
 
@@ -109,22 +109,27 @@ export default function BarcodeScannerScreen() {
 
     try {
       // Step 1: Check local cache
-      const localMatch = products.find(p => (p as any).barcode === data);
-      if (localMatch) {
-        setFoundProduct({
-          id: localMatch.id,
-          name: localMatch.name_bangla || (localMatch as any).name_english || '',
-          brand: (localMatch as any).brand,
-          unit: localMatch.unit,
-          sale_price: localMatch.sale_price,
-          barcode: data,
-          current_stock: localMatch.current_stock,
-          mrp: (localMatch as any).mrp,
-        });
-        setQuantity(1);
-        setProductModalVisible(true);
-        return;
-      }
+     if (!products || products.length === 0) {
+  console.log('Products not loaded yet');
+  // Continue to API lookup instead of failing
+} else {
+  const localMatch = products.find(p => (p as any).barcode === data);
+  if (localMatch) {
+    setFoundProduct({
+      id: localMatch.id,
+      name: localMatch.name_bangla || (localMatch as any).name_english || '',
+      brand: (localMatch as any).brand,
+      unit: localMatch.unit,
+      sale_price: localMatch.sale_price,
+      barcode: data,
+      current_stock: localMatch.current_stock,
+      mrp: (localMatch as any).mrp,
+    });
+    setQuantity(1);
+    setProductModalVisible(true);
+    return;
+  }
+}
 
       // Step 2: Single API call replaces 3-tier Supabase lookup
       const res = await productApi.barcodeLookup(data);

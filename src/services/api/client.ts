@@ -39,7 +39,8 @@ async function refreshAccessToken(): Promise<string | null> {
       body: JSON.stringify({ refreshToken }),
     });
     if (!res.ok) { await tokenStore.clear(); return null; }
-    const data = await res.json();
+    const json = await res.json();
+    const data = json?.data ?? json;
     await tokenStore.set(data.accessToken, data.refreshToken ?? refreshToken);
     return data.accessToken;
   } catch { return null; }
@@ -80,5 +81,7 @@ export async function apiRequest<T>(
   }
 
   if (res.status === 204) return undefined as T;
-  return res.json() as Promise<T>;
+  const json = await res.json();
+  // Backend wraps all responses in { success, message, data: T }
+  return (json && typeof json === 'object' && 'data' in json ? json.data : json) as T;
 }

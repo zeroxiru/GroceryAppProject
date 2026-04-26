@@ -1,168 +1,365 @@
-import React, { useState, useEffect } from 'react';
-import { View, Text, StyleSheet, TouchableOpacity, TextInput, Alert, ActivityIndicator, FlatList } from 'react-native';
+import React, { useState, useEffect, useRef } from 'react';
+import {
+  View, Text, StyleSheet, TouchableOpacity, TextInput,
+  ActivityIndicator, ScrollView,
+} from 'react-native';
 import { router } from 'expo-router';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
-import { authService } from '@/services/supabase/authService';
+import AsyncStorage from '@react-native-async-storage/async-storage';
 import { authApi } from '@/services/api/authApi';
+import { shopApi } from '@/services/api/shopApi';
 import { useAuthStore } from '@/store';
-import { User } from '@/types';
 import { COLORS, FONT_SIZES } from '@/constants';
+import { pinRateLimiter } from '@/utils/rateLimiter';
+
+type LoginMode = 'owner' | 'staff';
+
+const SHOP_ID_KEY = 'dokanai_device_shop_id';
 
 export default function PinLoginScreen() {
-  const { shop, logout } = useAuthStore();
-  const [users, setUsers] = useState<User[]>([]);
-  const [selectedUser, setSelectedUser] = useState<User | null>(null);
+  const [mode, setMode] = useState<LoginMode>('owner');
+  const [phone, setPhone] = useState('');
   const [pin, setPin] = useState('');
+  const [shopId, setShopId] = useState('');
+  const [shopIdLocked, setShopIdLocked] = useState(false);
   const [loading, setLoading] = useState(false);
-  const [phoneInput, setPhoneInput] = useState('');
-  const [lookupLoading, setLookupLoading] = useState(false);
+  const [errorMsg, setErrorMsg] = useState<string | null>(null);
+  const [attemptsLeft, setAttemptsLeft] = useState<number | null>(null);
+  const [lockoutSeconds, setLockoutSeconds] = useState(0);
+  const countdownRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
-  useEffect(() => { if (shop) loadUsers(shop.id); }, [shop]);
+  useEffect(() => {
+    AsyncStorage.getItem(SHOP_ID_KEY).then(saved => {
+      if (saved) { setShopId(saved); setShopIdLocked(true); }
+    });
+    return () => { if (countdownRef.current) clearInterval(countdownRef.current); };
+  }, []);
 
-  const loadUsers = async (shopId: string) => {
-    try { const u = await authService.getShopUsers(shopId); setUsers(u); } catch {}
+  const startCountdown = (seconds: number) => {
+    setLockoutSeconds(seconds);
+    if (countdownRef.current) clearInterval(countdownRef.current);
+    countdownRef.current = setInterval(() => {
+      setLockoutSeconds(prev => {
+        if (prev <= 1) { clearInterval(countdownRef.current!); return 0; }
+        return prev - 1;
+      });
+    }, 1000);
   };
 
-  const handleShopLookup = async () => {
-    setLookupLoading(true);
-    try {
-      // Try to validate phone against backend via login pre-check
-      // Just set the phone as shop identifier so PIN screen loads
-      if (phoneInput.length < 11) {
-        Alert.alert('সতর্কতা', 'সঠিক মোবাইল নম্বর দিন');
-        return;
-      }
-      // Store a minimal shop stub so the PIN screen renders
-      useAuthStore.getState().setShop({ id: '', name: '', phone: phoneInput } as any);
-      setUsers([{ id: 'owner', name: 'মালিক', role: 'owner', phone: phoneInput, pin: '', shop_id: '', is_active: true, created_at: '' }]);
-    } catch (e: any) { Alert.alert('ত্রুটি', e.message); }
-    finally { setLookupLoading(false); }
+  const switchMode = (m: LoginMode) => {
+    setMode(m); setErrorMsg(null); setAttemptsLeft(null); setPin('');
   };
+
+  const lockoutKey = `${phone}_${mode}`;
 
   const handlePinKey = async (key: string) => {
+    if (lockoutSeconds > 0 || loading) return;
     if (key === '⌫') { setPin(p => p.slice(0, -1)); return; }
     const newPin = pin + key;
     setPin(newPin);
-    if (newPin.length === 4 && selectedUser) {
-      setLoading(true);
-      try {
-        const phone = selectedUser.phone ?? shop?.phone ?? '';
-        const res = selectedUser.role === 'owner'
-          ? await authApi.ownerLogin(phone, newPin)
-          : await authApi.staffLogin(phone, newPin, shop?.id ?? '');
+    if (newPin.length < 4) return;
+
+    if (!/^01\d{9}$/.test(phone)) {
+      setErrorMsg('সঠিক মোবাইল নম্বর দিন (01XXXXXXXXX)');
+      setPin('');
+      return;
+    }
+    if (mode === 'staff' && !shopId.trim()) {
+      setErrorMsg('Shop ID দিন। মালিকের কাছ থেকে জানুন।');
+      setPin('');
+      return;
+    }
+
+    const { locked, secondsLeft } = await pinRateLimiter.check(lockoutKey);
+    if (locked) { startCountdown(secondsLeft); setPin(''); return; }
+
+    setLoading(true);
+    setErrorMsg(null);
+    setAttemptsLeft(null);
+
+    try {
+      if (mode === 'owner') {
+        const res = await authApi.ownerLogin(phone, newPin);
         await authApi.saveTokens(res);
         useAuthStore.getState().setShop(res.shop);
         useAuthStore.getState().setUser(res.user);
         useAuthStore.getState().setTokens(res.accessToken, res.refreshToken);
-        router.replace('/(tabs)/home');
-      } catch (e: any) {
-        Alert.alert('ভুল PIN', e.message ?? 'আবার চেষ্টা করুন');
-        setPin('');
-      } finally { setLoading(false); }
+      } else {
+        const res = await authApi.staffLogin(phone, newPin, shopId.trim());
+        await authApi.saveTokens(res);
+        await AsyncStorage.setItem(SHOP_ID_KEY, shopId.trim());
+        setShopIdLocked(true);
+        // Staff login response has no shop — fetch it after saving the token
+        const shop = await shopApi.getMe();
+        useAuthStore.getState().setShop(shop);
+        useAuthStore.getState().setUser(res.user);
+        useAuthStore.getState().setTokens(res.accessToken, res.refreshToken);
+      }
+      await pinRateLimiter.recordSuccess(lockoutKey);
+      router.replace('/(tabs)/home');
+    } catch (e: any) {
+      const { lockSec, attemptsLeft: left } = await pinRateLimiter.recordFailure(lockoutKey);
+      if (lockSec > 0) {
+        startCountdown(lockSec);
+        setErrorMsg(`অনেকবার ভুল হয়েছে। ${lockSec} সেকেন্ড অপেক্ষা করুন।`);
+        setAttemptsLeft(0);
+      } else {
+        setErrorMsg(e.message ?? 'আবার চেষ্টা করুন');
+        setAttemptsLeft(left);
+      }
+      setPin('');
+    } finally {
+      setLoading(false);
     }
   };
 
-  if (!shop) {
-    return (
-      <SafeAreaView style={styles.container}>
-        <View style={styles.card}>
-          <Ionicons name="storefront" size={40} color={COLORS.primary} />
-          <Text style={styles.title}>দোকান খুঁজুন</Text>
-          <View style={styles.phoneRow}>
-            <TextInput style={styles.phoneInput} placeholder="01XXXXXXXXX" placeholderTextColor={COLORS.textMuted} keyboardType="phone-pad" maxLength={11} value={phoneInput} onChangeText={setPhoneInput} />
-            <TouchableOpacity style={styles.lookupBtn} onPress={handleShopLookup} disabled={lookupLoading}>
-              {lookupLoading ? <ActivityIndicator color={COLORS.surface} size="small" /> : <Ionicons name="search" size={20} color={COLORS.surface} />}
-            </TouchableOpacity>
-          </View>
-          <TouchableOpacity onPress={() => router.push('/shop-setup')}>
-            <Text style={styles.linkText}>নতুন দোকান তৈরি করুন →</Text>
-          </TouchableOpacity>
-        </View>
-      </SafeAreaView>
-    );
-  }
-
   return (
     <SafeAreaView style={styles.container}>
-      <View style={styles.shopHeader}>
-        <View style={styles.shopIcon}><Ionicons name="storefront" size={28} color={COLORS.surface} /></View>
-        <Text style={styles.shopName}>{shop.name}</Text>
-        <TouchableOpacity style={styles.changeShopBtn} onPress={() => { logout(); }}>
-          <Ionicons name="swap-horizontal" size={14} color="rgba(255,255,255,0.8)" />
-          <Text style={styles.changeShopText}>দোকান পরিবর্তন</Text>
-        </TouchableOpacity>
-      </View>
+      <ScrollView contentContainerStyle={styles.scroll} keyboardShouldPersistTaps="handled">
 
-      {!selectedUser ? (
-        <View style={styles.card}>
-          <Text style={styles.title}>কে প্রবেশ করছেন?</Text>
-          <FlatList data={users} keyExtractor={u => u.id}
-            renderItem={({ item }) => (
-              <TouchableOpacity style={styles.userRow} onPress={() => setSelectedUser(item)}>
-                <View style={[styles.avatar, { backgroundColor: item.role === 'owner' ? COLORS.primary : COLORS.primaryLight }]}>
-                  <Text style={styles.avatarText}>{item.name[0]}</Text>
-                </View>
-                <View style={{ flex: 1 }}>
-                  <Text style={styles.userName}>{item.name}</Text>
-                  <Text style={styles.userRole}>{item.role === 'owner' ? 'মালিক' : 'কর্মচারী'}</Text>
-                </View>
-                <Ionicons name="chevron-forward" size={18} color={COLORS.textMuted} />
-              </TouchableOpacity>
-            )}
-            ItemSeparatorComponent={() => <View style={{ height: 1, backgroundColor: COLORS.border }} />}
-          />
+        {/* Brand */}
+        <View style={styles.brand}>
+          <Ionicons name="storefront" size={40} color={COLORS.surface} />
+          <Text style={styles.brandTitle}>DokanAI POS</Text>
+          <Text style={styles.brandSub}>দোকান চালাও সহজে</Text>
         </View>
-      ) : (
+
         <View style={styles.card}>
-          <TouchableOpacity onPress={() => { setSelectedUser(null); setPin(''); }} style={styles.backBtn}>
-            <Ionicons name="arrow-back" size={18} color={COLORS.primary} />
-            <Text style={{ color: COLORS.primary, fontSize: FONT_SIZES.sm, fontWeight: '600' }}>ফিরে যান</Text>
+
+          {/* Mode toggle — মালিক / কর্মচারী */}
+          <View style={styles.modeToggle}>
+            <TouchableOpacity
+              style={[styles.modeBtn, mode === 'owner' && styles.modeBtnActive]}
+              onPress={() => switchMode('owner')}
+            >
+              <Text style={[styles.modeBtnText, mode === 'owner' && styles.modeBtnTextActive]}>মালিক</Text>
+            </TouchableOpacity>
+            <TouchableOpacity
+              style={[styles.modeBtn, mode === 'staff' && styles.modeBtnActive]}
+              onPress={() => switchMode('staff')}
+            >
+              <Text style={[styles.modeBtnText, mode === 'staff' && styles.modeBtnTextActive]}>কর্মচারী</Text>
+            </TouchableOpacity>
+          </View>
+
+          {/* Shop ID — staff only, pre-filled after first login */}
+          {mode === 'staff' && (
+            <View style={styles.fieldGroup}>
+              <View style={styles.labelRow}>
+                <Text style={styles.label}>Shop ID</Text>
+                {shopIdLocked ? (
+                  <View style={{ flexDirection: 'row', alignItems: 'center', gap: 4 }}>
+                    <Ionicons name="lock-closed" size={11} color={COLORS.primary} />
+                    <Text style={{ fontSize: FONT_SIZES.xs, color: COLORS.primary, fontWeight: '600' }}>ডিভাইস সেট আপ</Text>
+                  </View>
+                ) : (
+                  <Text style={{ fontSize: FONT_SIZES.xs, color: COLORS.textMuted }}>মালিকের কাছ থেকে নিন</Text>
+                )}
+              </View>
+              <TextInput
+                style={[styles.input, styles.monoInput, shopIdLocked && styles.inputLocked]}
+                value={shopId}
+                onChangeText={t => !shopIdLocked && setShopId(t.trim())}
+                placeholder="xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
+                placeholderTextColor={COLORS.textMuted}
+                editable={!shopIdLocked}
+                autoCapitalize="none"
+                autoCorrect={false}
+              />
+              {shopIdLocked && (
+                <TouchableOpacity onPress={async () => {
+                  await AsyncStorage.removeItem(SHOP_ID_KEY);
+                  setShopId('');
+                  setShopIdLocked(false);
+                }}>
+                  <Text style={styles.resetText}>ভুল দোকান? রিসেট করুন</Text>
+                </TouchableOpacity>
+              )}
+            </View>
+          )}
+
+          {/* Phone */}
+          <View style={styles.fieldGroup}>
+            <Text style={styles.label}>মোবাইল নম্বর</Text>
+            <TextInput
+              style={styles.input}
+              value={phone}
+              onChangeText={setPhone}
+              placeholder="01XXXXXXXXX"
+              placeholderTextColor={COLORS.textMuted}
+              keyboardType="phone-pad"
+              maxLength={11}
+              autoFocus
+              editable={!loading}
+            />
+          </View>
+
+          {/* PIN dots */}
+          <View style={styles.pinSection}>
+            <Text style={styles.label}>৪ সংখ্যার PIN</Text>
+            <View style={styles.pinDots}>
+              {[0, 1, 2, 3].map(i => (
+                <View
+                  key={i}
+                  style={[styles.dot, { backgroundColor: i < pin.length ? COLORS.primary : COLORS.border }]}
+                />
+              ))}
+            </View>
+          </View>
+
+          {/* Error */}
+          {errorMsg && (
+            <View style={styles.errorBox}>
+              <Ionicons name="alert-circle" size={16} color={COLORS.error} />
+              <View style={{ flex: 1 }}>
+                <Text style={styles.errorText}>{errorMsg}</Text>
+                {attemptsLeft !== null && attemptsLeft > 0 && (
+                  <Text style={styles.attemptsText}>{attemptsLeft}টি চেষ্টা বাকি</Text>
+                )}
+                {attemptsLeft === 0 && lockoutSeconds === 0 && (
+                  <Text style={styles.attemptsText}>১৫ মিনিট পরে আবার চেষ্টা করুন</Text>
+                )}
+              </View>
+            </View>
+          )}
+
+          {/* Lockout banner */}
+          {lockoutSeconds > 0 && (
+            <View style={styles.lockoutBox}>
+              <Ionicons name="lock-closed" size={14} color={COLORS.error} />
+              <Text style={styles.lockoutText}>{lockoutSeconds}s অপেক্ষা করুন</Text>
+            </View>
+          )}
+
+          {/* Numpad */}
+          {loading ? (
+            <ActivityIndicator color={COLORS.primary} size="large" style={{ marginTop: 32 }} />
+          ) : (
+            <View style={[styles.numpad, lockoutSeconds > 0 && { opacity: 0.4 }]}>
+              {['1', '2', '3', '4', '5', '6', '7', '8', '9', '', '0', '⌫'].map((key, idx) => (
+                <TouchableOpacity
+                  key={idx}
+                  style={[styles.numKey, !key && styles.numKeyHidden]}
+                  onPress={() => key && handlePinKey(key)}
+                  disabled={!key || lockoutSeconds > 0 || loading}
+                >
+                  <Text style={[styles.numKeyText, key === '⌫' && { fontSize: 20 }]}>{key}</Text>
+                </TouchableOpacity>
+              ))}
+            </View>
+          )}
+
+          <TouchableOpacity onPress={() => router.push('/shop-setup')} style={{ marginTop: 20 }}>
+            <Text style={styles.linkText}>নতুন দোকান তৈরি করুন →</Text>
           </TouchableOpacity>
-          <View style={[styles.avatar, { width: 72, height: 72, borderRadius: 36, backgroundColor: COLORS.primary, alignSelf: 'center' }]}>
-            <Text style={[styles.avatarText, { fontSize: 28 }]}>{selectedUser.name[0]}</Text>
-          </View>
-          <Text style={[styles.title, { marginTop: 12 }]}>{selectedUser.name}</Text>
-          <Text style={{ fontSize: FONT_SIZES.sm, color: COLORS.textSecondary, textAlign: 'center', marginBottom: 24 }}>৪ সংখ্যার PIN দিন</Text>
-          <View style={styles.pinDots}>
-            {[0,1,2,3].map(i => <View key={i} style={[styles.dot, { backgroundColor: i < pin.length ? COLORS.primary : COLORS.border }]} />)}
-          </View>
-          {loading && <ActivityIndicator color={COLORS.primary} style={{ marginBottom: 16 }} />}
-          <View style={styles.numpad}>
-            {['1','2','3','4','5','6','7','8','9','','0','⌫'].map((key, idx) => (
-              <TouchableOpacity key={idx} style={[styles.numKey, !key && { opacity: 0 }]} onPress={() => key && handlePinKey(key)} disabled={!key}>
-                <Text style={[styles.numKeyText, key === '⌫' && { fontSize: 20 }]}>{key}</Text>
-              </TouchableOpacity>
-            ))}
-          </View>
+
         </View>
-      )}
+      </ScrollView>
     </SafeAreaView>
   );
 }
 
 const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: COLORS.primary },
-  shopHeader: { alignItems: 'center', paddingVertical: 24, gap: 8 },
-  changeShopBtn: { flexDirection: 'row', alignItems: 'center', gap: 4, paddingHorizontal: 12, paddingVertical: 6, borderRadius: 20, backgroundColor: 'rgba(255,255,255,0.15)', marginTop: 4 },
-  changeShopText: { fontSize: FONT_SIZES.xs, color: 'rgba(255,255,255,0.85)', fontWeight: '500' },
-  shopIcon: { width: 60, height: 60, borderRadius: 30, backgroundColor: 'rgba(255,255,255,0.2)', alignItems: 'center', justifyContent: 'center' },
-  shopName: { fontSize: FONT_SIZES.lg, fontWeight: '700', color: COLORS.surface, textAlign: 'center', paddingHorizontal: 20 },
-  card: { flex: 1, backgroundColor: COLORS.surface, borderTopLeftRadius: 28, borderTopRightRadius: 28, padding: 24, alignItems: 'center' },
-  title: { fontSize: FONT_SIZES.xl, fontWeight: '700', color: COLORS.text, marginBottom: 6 },
-  userRow: { flexDirection: 'row', alignItems: 'center', gap: 14, paddingVertical: 14, width: '100%' },
-  avatar: { width: 48, height: 48, borderRadius: 24, alignItems: 'center', justifyContent: 'center' },
-  avatarText: { color: COLORS.surface, fontSize: FONT_SIZES.lg, fontWeight: '700' },
-  userName: { fontSize: FONT_SIZES.md, fontWeight: '600', color: COLORS.text },
-  userRole: { fontSize: FONT_SIZES.sm, color: COLORS.textSecondary },
-  backBtn: { flexDirection: 'row', alignItems: 'center', gap: 4, alignSelf: 'flex-start', marginBottom: 20 },
-  pinDots: { flexDirection: 'row', gap: 16, marginVertical: 24 },
+  scroll: { flexGrow: 1 },
+  brand: { alignItems: 'center', paddingVertical: 32, gap: 6 },
+  brandTitle: { fontSize: FONT_SIZES.xxl, fontWeight: '700', color: COLORS.surface },
+  brandSub: { fontSize: FONT_SIZES.sm, color: 'rgba(255,255,255,0.75)' },
+  card: {
+    flex: 1,
+    backgroundColor: COLORS.surface,
+    borderTopLeftRadius: 28,
+    borderTopRightRadius: 28,
+    padding: 24,
+    alignItems: 'center',
+  },
+  modeToggle: {
+    flexDirection: 'row',
+    width: '100%',
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: COLORS.border,
+    overflow: 'hidden',
+    marginBottom: 20,
+  },
+  modeBtn: {
+    flex: 1,
+    paddingVertical: 11,
+    alignItems: 'center',
+    backgroundColor: COLORS.surface,
+  },
+  modeBtnActive: { backgroundColor: COLORS.primary },
+  modeBtnText: { fontSize: FONT_SIZES.sm, fontWeight: '600', color: COLORS.textSecondary },
+  modeBtnTextActive: { color: COLORS.surface },
+  fieldGroup: { width: '100%', marginBottom: 16 },
+  labelRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    marginBottom: 6,
+  },
+  label: { fontSize: FONT_SIZES.sm, fontWeight: '600', color: COLORS.text, marginBottom: 6 },
+  input: {
+    width: '100%',
+    height: 50,
+    borderWidth: 1,
+    borderColor: COLORS.border,
+    borderRadius: 12,
+    paddingHorizontal: 16,
+    fontSize: FONT_SIZES.md,
+    color: COLORS.text,
+    backgroundColor: COLORS.surface,
+  },
+  monoInput: { fontFamily: 'monospace', fontSize: FONT_SIZES.xs },
+  inputLocked: { backgroundColor: '#F5F5F5', color: COLORS.textMuted },
+  resetText: { fontSize: FONT_SIZES.xs, color: COLORS.textMuted, marginTop: 4 },
+  pinSection: { width: '100%', alignItems: 'center', marginBottom: 12 },
+  pinDots: { flexDirection: 'row', gap: 16, marginTop: 12 },
   dot: { width: 16, height: 16, borderRadius: 8 },
-  numpad: { flexDirection: 'row', flexWrap: 'wrap', width: 240, gap: 12, justifyContent: 'center' },
-  numKey: { width: 68, height: 68, borderRadius: 34, backgroundColor: COLORS.surfaceSecondary, alignItems: 'center', justifyContent: 'center' },
+  errorBox: {
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+    gap: 8,
+    backgroundColor: '#FEF2F2',
+    borderWidth: 1,
+    borderColor: '#FECACA',
+    borderRadius: 10,
+    paddingHorizontal: 14,
+    paddingVertical: 10,
+    width: '100%',
+    marginBottom: 8,
+  },
+  errorText: { fontSize: FONT_SIZES.sm, color: COLORS.error, fontWeight: '500' },
+  attemptsText: { fontSize: FONT_SIZES.xs, color: COLORS.error, opacity: 0.8, marginTop: 2 },
+  lockoutBox: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    backgroundColor: '#FEE2E2',
+    borderRadius: 10,
+    paddingHorizontal: 14,
+    paddingVertical: 8,
+    marginBottom: 12,
+  },
+  lockoutText: { fontSize: FONT_SIZES.sm, color: COLORS.error, fontWeight: '600' },
+  numpad: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    width: 240,
+    gap: 12,
+    justifyContent: 'center',
+    marginTop: 8,
+  },
+  numKey: {
+    width: 68,
+    height: 68,
+    borderRadius: 34,
+    backgroundColor: COLORS.surfaceSecondary,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  numKeyHidden: { opacity: 0 },
   numKeyText: { fontSize: FONT_SIZES.xxl, fontWeight: '400', color: COLORS.text },
-  phoneRow: { flexDirection: 'row', width: '100%', gap: 8, marginVertical: 16 },
-  phoneInput: { flex: 1, borderWidth: 1, borderColor: COLORS.border, borderRadius: 12, height: 52, paddingHorizontal: 16, fontSize: FONT_SIZES.md, color: COLORS.text },
-  lookupBtn: { width: 52, height: 52, borderRadius: 12, backgroundColor: COLORS.primary, alignItems: 'center', justifyContent: 'center' },
-  linkText: { color: COLORS.primary, fontSize: FONT_SIZES.sm, fontWeight: '600', marginTop: 12 },
+  linkText: { fontSize: FONT_SIZES.sm, color: COLORS.primary, fontWeight: '600' },
 });

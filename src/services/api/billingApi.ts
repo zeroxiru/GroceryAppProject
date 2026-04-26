@@ -28,6 +28,8 @@ export interface BillingResponse {
   discount_amount: number;
   net_total: number;
   payment_method: PaymentMethod;
+  customer_name?: string;
+  customer_id?: string;
 }
 
 export interface TodayBillingResponse {

@@ -13,6 +13,17 @@ export interface Shop {
   pin?: string;
   shop_type?: 'grocery' | 'cosmetics' | 'imported' | 'mixed';
   voice_language?: string;
+  default_discount?: number;
+  created_at?: string;
+}
+
+export interface Supplier {
+  id: string;
+  shop_id: string;
+  name: string;
+  phone?: string;
+  address?: string;
+  notes?: string;
   created_at?: string;
 }
 
@@ -22,7 +33,7 @@ export interface User {
   name: string;
   phone?: string;
   pin: string;
-  role: 'owner' | 'helper';
+  role: 'owner' | 'staff' | 'helper';
   is_active: boolean;
   created_at: string;
 }
@@ -72,6 +83,7 @@ export interface Transaction {
   discount_amount?: number;
   invoice_number?: string;
   customer_name?: string;
+  customer_id?: string;
   payment_method?: PaymentMethod;
   notes?: string;
   voided?: boolean;

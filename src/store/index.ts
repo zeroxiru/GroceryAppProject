@@ -1,4 +1,3 @@
-
 import { create } from 'zustand';
 import { persist, createJSONStorage } from 'zustand/middleware';
 import AsyncStorage from '@react-native-async-storage/async-storage';
@@ -73,14 +72,14 @@ interface TransactionStore {
 export const useTransactionStore = create<TransactionStore>()(
   persist(
     (set) => ({
-      todayTransactions: [],
-      pendingBills: [],
-      setTodayTransactions: (todayTransactions) => set({ todayTransactions }),
+      todayTransactions: [] as Transaction[],
+      pendingBills: [] as BillingPayload[],
+      setTodayTransactions: (todayTransactions) => set({ todayTransactions: todayTransactions ?? [] }),
       addTransactions: (txns) => set((s) => ({
-        todayTransactions: [...txns, ...s.todayTransactions],
+        todayTransactions: [...(txns ?? []), ...(s.todayTransactions ?? [])],
       })),
       addPendingBill: (bill) => set((s) => ({
-        pendingBills: [...s.pendingBills, bill],
+        pendingBills: [...(s.pendingBills ?? []), bill],
       })),
       clearPendingBills: () => set({ pendingBills: [] }),
     }),
@@ -88,6 +87,12 @@ export const useTransactionStore = create<TransactionStore>()(
       name: 'dokan-transactions',
       storage: createJSONStorage(() => AsyncStorage),
       partialize: (s) => ({ pendingBills: s.pendingBills }),
+      merge: (persisted: any, current) => ({
+        ...current,
+        ...persisted,
+        todayTransactions: persisted?.todayTransactions ?? [],
+        pendingBills: persisted?.pendingBills ?? [],
+      }),
     }
   )
 );

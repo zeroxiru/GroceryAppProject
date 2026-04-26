@@ -7,8 +7,10 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
 import { CameraView, Camera } from 'expo-camera';
 import { useAuthStore, useProductStore } from '@/store';
-import { productApi } from '@/services/api/productApi';
+import { productApi, BulkImportRow } from '@/services/api/productApi';
 import { inventoryApi, StockMovement, MovementType } from '@/services/api/inventoryApi';
+import { suppliersApi } from '@/services/api/suppliersApi';
+import { Supplier } from '@/types';
 import { Product } from '@/types';
 import { COLORS, FONT_SIZES } from '@/constants';
 import { format, differenceInDays, parseISO } from 'date-fns';
@@ -51,8 +53,11 @@ type Tab = 'products' | 'low_stock' | 'expiring' | 'movements';
 
 export default function InventoryScreen() {
   const { shop } = useAuthStore();
-  const { products, setProducts, isLoading, setLoading } = useProductStore();
+  const { products = [], setProducts, isLoading = false, setLoading } = useProductStore();
   const [activeTab, setActiveTab] = useState<Tab>('products');
+  // Safe guard - prevent filter errors
+  const safeProducts = products || [];
+  const safeIsLoading = isLoading === undefined ? true : isLoading;
   const [search, setSearch] = useState('');
   const [editingProduct, setEditingProduct] = useState<Product | null>(null);
   const [modalVisible, setModalVisible] = useState(false);
@@ -77,7 +82,8 @@ export default function InventoryScreen() {
     finally { setLoading(false); }
   };
 
-  const filtered = products.filter(p => {
+  const filtered = (products || []).filter(p => {
+      if (!p) return false;
     const matchSearch = !search
       || p.name_bangla?.toLowerCase().includes(search.toLowerCase())
       || (p.name_english?.toLowerCase().includes(search.toLowerCase()) ?? false)
@@ -87,8 +93,8 @@ export default function InventoryScreen() {
     return matchSearch && matchCat;
   });
 
-  const lowStockCount = products.filter(
-    p => p.min_stock_alert > 0 && p.current_stock <= p.min_stock_alert
+  const lowStockCount = (products || []).filter(
+    p => p && p.min_stock_alert > 0 && p.current_stock <= p.min_stock_alert
   ).length;
 
   const categories = shop?.shop_type === 'cosmetics' ? COSMETICS_CATEGORIES
@@ -114,14 +120,8 @@ export default function InventoryScreen() {
       <View style={styles.header}>
         <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' }}>
           <Text style={styles.title}>{isCosmetics ? 'Inventory' : 'ইনভেন্টরি'}</Text>
-          {lowStockCount > 0 && (
-            <View style={styles.alertBadge}>
-              <Ionicons name="warning" size={14} color="#fff" />
-              <Text style={styles.alertText}>{lowStockCount} কম স্টক</Text>
-            </View>
-          )}
         </View>
-        <Text style={styles.subtitle}>{products.length} {isCosmetics ? 'Products' : 'টি পণ্য'}</Text>
+        <Text style={styles.subtitle}>0 {isCosmetics ? 'Products' : 'টি পণ্য'}</Text>
       </View>
 
       {/* Tab bar */}
@@ -262,6 +262,7 @@ export default function InventoryScreen() {
         product={editingProduct}
         shopId={shop?.id ?? ''}
         shopType={shop?.shop_type ?? 'grocery'}
+        shopDefaultDiscount={(shop as any)?.default_discount}
         onClose={() => setModalVisible(false)}
         onSaved={fetchProducts}
       />
@@ -292,7 +293,7 @@ export default function InventoryScreen() {
 // ══════════════════════════════════════════
 // PRODUCT MODAL — Add / Edit with all fields
 // ══════════════════════════════════════════
-function ProductModal({ visible, product, shopId, shopType, onClose, onSaved }: any) {
+function ProductModal({ visible, product, shopId, shopType, shopDefaultDiscount, onClose, onSaved }: any) {
   const isCosmetics = shopType === 'cosmetics' || shopType === 'imported';
 
   const [name, setName] = useState('');
@@ -304,6 +305,7 @@ function ProductModal({ visible, product, shopId, shopType, onClose, onSaved }: 
   const [salePrice, setSalePrice] = useState('');
   const [purchasePrice, setPurchasePrice] = useState('');
   const [mrp, setMrp] = useState('');
+  const [mrpAutoApplied, setMrpAutoApplied] = useState(false);
   const [stock, setStock] = useState('0');
   const [minStock, setMinStock] = useState('5');
   const [barcode, setBarcode] = useState('');
@@ -341,7 +343,23 @@ function ProductModal({ visible, product, shopId, shopType, onClose, onSaved }: 
       setOriginCountry(''); setExpiryDate('');
       setCategory(isCosmetics ? 'Skin Care' : 'other');
     }
+    setMrpAutoApplied(false);
   }, [product, visible]);
+
+  // B9: Auto-calculate sale price from MRP when adding new cosmetics product
+  useEffect(() => {
+    if (!isCosmetics || product) return;
+    const mrpNum = parseFloat(mrp);
+    if (!mrpNum || mrpNum <= 0) { setMrpAutoApplied(false); return; }
+    if (!salePrice || mrpAutoApplied) {
+      const disc = shopDefaultDiscount ?? 0;
+      const auto = disc > 0
+        ? Math.round(mrpNum * (1 - disc / 100))
+        : mrpNum;
+      setSalePrice(String(auto));
+      setMrpAutoApplied(true);
+    }
+  }, [mrp]);
 
   const handleSave = async () => {
     const productName = isCosmetics ? nameEn : name;
@@ -488,7 +506,18 @@ function ProductModal({ visible, product, shopId, shopType, onClose, onSaved }: 
 
           <View style={{ flexDirection: 'row', gap: 10 }}>
             <View style={{ flex: 1 }}>
-              <Field label={isCosmetics ? 'Sale Price (৳) *' : 'বিক্রয় মূল্য (৳) *'} value={salePrice} onChangeText={setSalePrice} placeholder="0" numeric />
+              <Field
+                label={isCosmetics ? 'Sale Price (৳) *' : 'বিক্রয় মূল্য (৳) *'}
+                value={salePrice}
+                onChangeText={(v: string) => { setSalePrice(v); setMrpAutoApplied(false); }}
+                placeholder="0"
+                numeric
+              />
+              {mrpAutoApplied && isCosmetics && (shopDefaultDiscount ?? 0) > 0 && (
+                <Text style={{ fontSize: 10, color: COLORS.primary, marginTop: 2 }}>
+                  Auto: MRP − {shopDefaultDiscount}% discount
+                </Text>
+              )}
             </View>
             <View style={{ flex: 1 }}>
               <Field label={isCosmetics ? 'Cost Price (৳)' : 'ক্রয় মূল্য (৳)'} value={purchasePrice} onChangeText={setPurchasePrice} placeholder="0" numeric />
@@ -684,38 +713,31 @@ function BulkImportModal({ visible, shopId, shopType, onClose, onSaved }: any) {
   const handleImport = async () => {
     if (preview.length === 0) return;
     setImporting(true);
-    let success = 0;
-    let failed = 0;
     try {
-      for (const row of preview) {
-        try {
-          await productApi.create({
-            shop_id: shopId,
-            name_bangla: row.name_bangla || row.name_english,
-            name_english: row.name_english || row.name_bangla,
-            brand: row.brand || null,
-            category: row.category || 'other',
-            size: row.size || null,
-            unit: row.unit || 'piece',
-            sale_price: parseFloat(row.sale_price) || 0,
-            purchase_price: parseFloat(row.purchase_price) || 0,
-            mrp: parseFloat(row.mrp) || null,
-            current_stock: parseFloat(row.current_stock) || 0,
-            min_stock_alert: parseFloat(row.min_stock_alert) || 5,
-            barcode: row.barcode || null,
-            origin_country: row.origin_country || null,
-            expiry_date: row.expiry_date || null,
-            aliases: row.brand ? [row.brand.toLowerCase()] : [],
-            is_active: true,
-          });
-          success++;
-        } catch { failed++; }
-      }
+      const rows: BulkImportRow[] = preview.map(row => ({
+        name_bangla: row.name_bangla || row.name_english || undefined,
+        name_english: row.name_english || row.name_bangla || undefined,
+        brand: row.brand || undefined,
+        category: row.category || 'other',
+        size: row.size || undefined,
+        unit: row.unit || 'piece',
+        sale_price: parseFloat(row.sale_price) || 0,
+        purchase_price: parseFloat(row.purchase_price) || 0,
+        mrp: row.mrp ? parseFloat(row.mrp) : undefined,
+        current_stock: parseFloat(row.current_stock) || 0,
+        min_stock_alert: parseFloat(row.min_stock_alert) || 5,
+        barcode: row.barcode || undefined,
+        origin_country: row.origin_country || undefined,
+        expiry_date: row.expiry_date || undefined,
+      }));
+      const result = await productApi.bulkImport(rows);
       Alert.alert(
         isCosmetics ? 'Import Complete' : 'আমদানি সম্পন্ন',
-        `✓ ${success} products imported${failed > 0 ? `\n✗ ${failed} failed` : ''}`,
+        `✓ ${result.imported} products imported${result.failed > 0 ? `\n✗ ${result.failed} failed` : ''}`,
         [{ text: 'OK', onPress: () => { onSaved(); onClose(); setStep('info'); setCsvText(''); setPreview([]); } }]
       );
+    } catch (e: any) {
+      Alert.alert(isCosmetics ? 'Import Failed' : 'আমদানি ব্যর্থ', e.message);
     } finally { setImporting(false); }
   };
 
@@ -903,6 +925,9 @@ function StockInModal({ visible, product, onClose, onSaved }: any) {
   const [purchasePrice, setPurchasePrice] = useState('');
   const [note, setNote] = useState('');
   const [saving, setSaving] = useState(false);
+  const [suppliers, setSuppliers] = useState<Supplier[]>([]);
+  const [selectedSupplier, setSelectedSupplier] = useState<Supplier | null>(null);
+  const [showSupplierPicker, setShowSupplierPicker] = useState(false);
 
   useEffect(() => {
     if (product) {
@@ -910,7 +935,14 @@ function StockInModal({ visible, product, onClose, onSaved }: any) {
     }
     setQuantity('');
     setNote('');
+    setSelectedSupplier(null);
   }, [product, visible]);
+
+  useEffect(() => {
+    if (visible) {
+      suppliersApi.list().then(setSuppliers).catch(() => {});
+    }
+  }, [visible]);
 
   const newStock = (product?.current_stock ?? 0) + (parseFloat(quantity) || 0);
 
@@ -937,9 +969,13 @@ function StockInModal({ visible, product, onClose, onSaved }: any) {
         product_id: product.id,
         quantity: qty,
         purchase_price: price,
-        notes: note || 'Stock received',
+        supplier_id: selectedSupplier?.id,
+        notes: note || (selectedSupplier ? `From ${selectedSupplier.name}` : 'Stock received'),
       });
-      useProductStore.getState().updateStock(product.id, qty);
+      const store = useProductStore.getState();
+      if (store.updateStock) {
+        store.updateStock(product.id, qty);
+      }
 
       Alert.alert(
         isCosmetics ? 'Stock Updated ✓' : 'স্টক আপডেট ✓',
@@ -1055,6 +1091,53 @@ function StockInModal({ visible, product, onClose, onSaved }: any) {
             ) : null}
           </View>
 
+          {/* Supplier */}
+          <View style={{ gap: 6 }}>
+            <Text style={styles.fieldLabel}>
+              {isCosmetics ? 'Supplier (optional)' : 'সাপ্লায়ার (ঐচ্ছিক)'}
+            </Text>
+            <TouchableOpacity
+              style={[styles.modalInput, { justifyContent: 'center', flexDirection: 'row', alignItems: 'center' }]}
+              onPress={() => setShowSupplierPicker(true)}
+            >
+              <Text style={{ flex: 1, fontSize: FONT_SIZES.md, color: selectedSupplier ? COLORS.text : COLORS.textMuted }}>
+                {selectedSupplier ? selectedSupplier.name : (isCosmetics ? 'Select supplier...' : 'সাপ্লায়ার বেছে নিন...')}
+              </Text>
+              <Ionicons name="chevron-down" size={16} color={COLORS.textMuted} />
+            </TouchableOpacity>
+          </View>
+
+          {/* Supplier picker modal */}
+          <Modal visible={showSupplierPicker} animationType="slide" presentationStyle="pageSheet" onRequestClose={() => setShowSupplierPicker(false)}>
+            <SafeAreaView style={{ flex: 1, backgroundColor: COLORS.surface }}>
+              <View style={styles.modalHeader}>
+                <TouchableOpacity onPress={() => setShowSupplierPicker(false)}>
+                  <Ionicons name="close" size={24} color={COLORS.text} />
+                </TouchableOpacity>
+                <Text style={styles.modalTitle}>{isCosmetics ? 'Select Supplier' : 'সাপ্লায়ার বেছে নিন'}</Text>
+                <View style={{ width: 24 }} />
+              </View>
+              <FlatList
+                data={[null, ...suppliers]}
+                keyExtractor={(s, i) => s?.id ?? `none_${i}`}
+                renderItem={({ item }) => (
+                  <TouchableOpacity
+                    style={{ padding: 16, borderBottomWidth: 0.5, borderBottomColor: COLORS.border, flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' }}
+                    onPress={() => { setSelectedSupplier(item); setShowSupplierPicker(false); }}
+                  >
+                    <View>
+                      <Text style={{ fontSize: FONT_SIZES.md, color: item ? COLORS.text : COLORS.textMuted }}>
+                        {item ? item.name : (isCosmetics ? 'No supplier' : 'কোনো সাপ্লায়ার নেই')}
+                      </Text>
+                      {item?.phone && <Text style={{ fontSize: FONT_SIZES.xs, color: COLORS.textMuted }}>{item.phone}</Text>}
+                    </View>
+                    {selectedSupplier?.id === item?.id && <Ionicons name="checkmark" size={20} color={COLORS.primary} />}
+                  </TouchableOpacity>
+                )}
+              />
+            </SafeAreaView>
+          </Modal>
+
           {/* Note */}
           <View style={{ gap: 6 }}>
             <Text style={styles.fieldLabel}>
@@ -1064,7 +1147,7 @@ function StockInModal({ visible, product, onClose, onSaved }: any) {
               style={styles.modalInput}
               value={note}
               onChangeText={setNote}
-              placeholder={isCosmetics ? 'e.g. Received from supplier' : 'যেমন: সাপ্লায়ার থেকে পাওয়া'}
+              placeholder={isCosmetics ? 'e.g. Invoice #1234' : 'যেমন: ইনভয়েস #১২৩৪'}
               placeholderTextColor={COLORS.textMuted}
             />
           </View>
@@ -1435,6 +1518,11 @@ function MovementsTab({ isCosmetics }: { isCosmetics: boolean }) {
                         {item.quantity_before} → {item.quantity_after}
                       </Text>
                     </View>
+                    {item.supplier_name ? (
+                      <Text style={{ fontSize: 10, color: COLORS.purchase, fontWeight: '600' }} numberOfLines={1}>
+                        🏭 {item.supplier_name}
+                      </Text>
+                    ) : null}
                     {item.reference ? (
                       <Text style={{ fontSize: 10, color: COLORS.primary, fontWeight: '600' }} numberOfLines={1}>
                         🔗 {item.reference}

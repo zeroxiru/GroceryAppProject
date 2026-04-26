@@ -4,6 +4,7 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
 import { format, parseISO } from 'date-fns';
 import { reportsApi, ReportSummary, TopProduct, StockValuation, ReportPeriod } from '@/services/api/reportsApi';
+import { customersApi, CreditAgingCustomer } from '@/services/api/customersApi';
 import { useAuthStore } from '@/store';
 import { COLORS, FONT_SIZES } from '@/constants';
 import { formatCurrency } from '@/utils';
@@ -35,6 +36,8 @@ export default function ReportsScreen() {
   const [valuation, setValuation] = useState<StockValuation | null>(null);
   const [loading, setLoading] = useState(false);
   const [valuationLoading, setValuationLoading] = useState(false);
+  const [creditAging, setCreditAging] = useState<CreditAgingCustomer[]>([]);
+  const [creditLoading, setCreditLoading] = useState(false);
 
   const load = useCallback(async (p: ReportPeriod) => {
     setLoading(true);
@@ -60,8 +63,18 @@ export default function ReportsScreen() {
     } finally { setValuationLoading(false); }
   }, []);
 
+  const loadCreditAging = useCallback(async () => {
+    setCreditLoading(true);
+    try {
+      const data = await customersApi.creditAging();
+      setCreditAging(data);
+    } catch (e: any) {
+      console.warn('Credit aging fetch error:', e.message);
+    } finally { setCreditLoading(false); }
+  }, []);
+
   useEffect(() => { load(period); }, [period]);
-  useEffect(() => { loadValuation(); }, []);
+  useEffect(() => { loadValuation(); loadCreditAging(); }, []);
 
   const maxRevenue = Math.max(...topProducts.map(p => p.total_revenue), 1);
   const maxDailySale = Math.max(...(summary?.daily_breakdown ?? []).map(d => d.sales), 1);
@@ -112,14 +125,14 @@ export default function ReportsScreen() {
               ))}
             </View>
 
-            {/* ── KPI Row 2: Avg Bill / Discount / Voided ── */}
+            {/* ── KPI Row 2: Purchase Cost / Discount / Voided ── */}
             <View style={{ flexDirection: 'row', paddingHorizontal: 12, gap: 8, marginBottom: 4 }}>
               {[
                 {
-                  icon: 'receipt-outline' as const,
-                  label: T('গড় বিল', 'Avg Bill'),
-                  value: `৳${formatCurrency(summary.average_bill_value)}`,
-                  color: COLORS.primary,
+                  icon: 'cart-outline' as const,
+                  label: T('মোট ক্রয় খরচ', 'Purchase Cost'),
+                  value: `৳${formatCurrency(summary.total_purchase_cost ?? 0)}`,
+                  color: COLORS.purchase,
                 },
                 {
                   icon: 'pricetag-outline' as const,
@@ -266,6 +279,96 @@ export default function ReportsScreen() {
             ))}
           </View>
         )}
+
+        {/* ── Credit Aging (বাকি খাতা) ── */}
+        <View style={styles.card}>
+          <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginBottom: 12 }}>
+            <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
+              <Ionicons name="people-outline" size={16} color="#7C3AED" />
+              <Text style={[styles.sectionTitle, { marginBottom: 0, color: '#7C3AED' }]}>
+                {T('বাকি খাতা', 'Credit Aging')}
+              </Text>
+            </View>
+            <TouchableOpacity onPress={loadCreditAging}>
+              <Ionicons name="refresh" size={16} color={COLORS.primary} />
+            </TouchableOpacity>
+          </View>
+
+          {creditLoading ? (
+            <ActivityIndicator color={COLORS.primary} />
+          ) : creditAging.length === 0 ? (
+            <View style={{ alignItems: 'center', padding: 20 }}>
+              <Ionicons name="checkmark-circle-outline" size={32} color={COLORS.sale} />
+              <Text style={{ color: COLORS.textMuted, fontSize: FONT_SIZES.sm, marginTop: 6 }}>
+                {T('কোনো বাকি নেই', 'No outstanding credit')}
+              </Text>
+            </View>
+          ) : (
+            <>
+              {/* Total outstanding banner */}
+              <View style={{ backgroundColor: '#7C3AED12', borderRadius: 10, padding: 12, alignItems: 'center', marginBottom: 12 }}>
+                <Text style={{ fontSize: 11, color: '#7C3AED', fontWeight: '600' }}>
+                  {T('মোট বাকি', 'Total Outstanding')}
+                </Text>
+                <Text style={{ fontSize: FONT_SIZES.xl, fontWeight: '700', color: '#7C3AED', marginTop: 2 }}>
+                  ৳{formatCurrency(creditAging.reduce((s, c) => s + c.total_outstanding, 0))}
+                </Text>
+                <Text style={{ fontSize: FONT_SIZES.xs, color: COLORS.textMuted, marginTop: 2 }}>
+                  {creditAging.length} {T('জন কাস্টমার', 'customers')}
+                </Text>
+              </View>
+
+              {/* Customer rows sorted by overdue days */}
+              {[...creditAging]
+                .sort((a, b) => b.overdue_days - a.overdue_days)
+                .map((c, i) => (
+                  <View
+                    key={i}
+                    style={{
+                      flexDirection: 'row', alignItems: 'center',
+                      paddingVertical: 10,
+                      borderBottomWidth: i < creditAging.length - 1 ? 0.5 : 0,
+                      borderBottomColor: COLORS.border,
+                    }}
+                  >
+                    <View style={{
+                      width: 36, height: 36, borderRadius: 18,
+                      backgroundColor: c.overdue_days > 30 ? '#FEE2E2' : c.overdue_days > 7 ? '#FEF3C7' : COLORS.surfaceSecondary,
+                      alignItems: 'center', justifyContent: 'center', marginRight: 10,
+                    }}>
+                      <Text style={{ fontSize: FONT_SIZES.sm, fontWeight: '700', color: COLORS.text }}>
+                        {c.customer_name.charAt(0).toUpperCase()}
+                      </Text>
+                    </View>
+                    <View style={{ flex: 1 }}>
+                      <Text style={{ fontSize: FONT_SIZES.sm, fontWeight: '600', color: COLORS.text }} numberOfLines={1}>
+                        {c.customer_name}
+                      </Text>
+                      <Text style={{ fontSize: FONT_SIZES.xs, color: COLORS.textMuted }}>
+                        {c.invoice_count} {T('বিল', 'invoices')} •{' '}
+                        {c.overdue_days > 0
+                          ? T(`${c.overdue_days} দিন বাকি`, `${c.overdue_days}d overdue`)
+                          : T('আজকের বাকি', 'Today')}
+                      </Text>
+                    </View>
+                    <View style={{ alignItems: 'flex-end' }}>
+                      <Text style={{ fontSize: FONT_SIZES.sm, fontWeight: '700', color: c.overdue_days > 30 ? COLORS.error : '#7C3AED' }}>
+                        ৳{formatCurrency(c.total_outstanding)}
+                      </Text>
+                      {c.overdue_days > 30 && (
+                        <View style={{ flexDirection: 'row', alignItems: 'center', gap: 2 }}>
+                          <Ionicons name="warning" size={10} color={COLORS.error} />
+                          <Text style={{ fontSize: 9, color: COLORS.error, fontWeight: '600' }}>
+                            {T('মেয়াদ উত্তীর্ণ', 'Overdue')}
+                          </Text>
+                        </View>
+                      )}
+                    </View>
+                  </View>
+                ))}
+            </>
+          )}
+        </View>
 
         {/* ── Stock Valuation ── */}
         <View style={styles.card}>

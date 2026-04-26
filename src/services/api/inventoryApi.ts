@@ -14,6 +14,8 @@ export interface StockMovement {
   reference?: string;
   notes?: string;
   user_name: string;
+  supplier_id?: string;
+  supplier_name?: string;
   created_at: string;
 }
 
@@ -22,6 +24,7 @@ export const inventoryApi = {
     product_id: string;
     quantity: number;
     purchase_price?: number;
+    supplier_id?: string;
     notes?: string;
   }): Promise<void> {
     return apiRequest<void>('POST', '/inventory/stock-in', params);

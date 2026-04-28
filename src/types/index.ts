@@ -4,6 +4,30 @@ export type ShopType = 'grocery' | 'cosmetics' | 'imported' | 'mixed';
 export type ProductCategory = 'grain' | 'oil' | 'spice' | 'vegetable' | 'fish_meat' | 'dairy' | 'beverage' | 'snack' | 'cleaning' | 'other';
 export type VoiceStatus = 'idle' | 'listening' | 'processing' | 'confirming' | 'saving' | 'error';
 
+export interface CatalogSubcategory {
+  id: string;
+  parent_id: string;
+  name: string;
+  display_name_english: string;
+  display_name_bangla: string | null;
+  sort_order: number;
+  is_active: boolean;
+}
+
+export interface CatalogCategory {
+  id: string;
+  shop_type: ShopType;
+  name: string;
+  display_name_english: string;
+  display_name_bangla: string | null;
+  description: string | null;
+  icon: string | null;
+  color: string | null;
+  sort_order: number;
+  is_active: boolean;
+  subcategories: CatalogSubcategory[];
+}
+
 export interface Shop {
   id: string;
   name: string;

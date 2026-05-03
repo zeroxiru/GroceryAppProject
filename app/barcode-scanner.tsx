@@ -11,6 +11,7 @@ import { router } from 'expo-router';
 import { COLORS, FONT_SIZES } from '@/constants';
 import { useProductStore, useAuthStore } from '@/store';
 import { productApi } from '@/services/api/productApi';
+import { ApiError, OfflineError } from '@/services/api/client';
 import { GlobalProduct } from '@/types';
 import { v4 as uuidv4 } from 'uuid';
 
@@ -89,9 +90,14 @@ export default function BarcodeScannerScreen() {
 
   const cooldownRef = useRef<boolean>(false);
   const lastScanned = useRef<string>('');
+  // Buffer for non-EAN13 reads: barcode → consecutive hit count
+  const scanBufferRef = useRef<Map<string, number>>(new Map());
+  const bufferTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   useEffect(() => {
     requestPermission();
+    // Always do a fresh product fetch when the scanner opens so the cache reflects current DB state
+    productApi.listAll().then(setProducts).catch(() => {});
   }, []);
 
   const requestPermission = async () => {
@@ -99,64 +105,25 @@ export default function BarcodeScannerScreen() {
     setHasPermission(status === 'granted');
   };
 
-  const handleBarcodeScan = async ({ data }: { type: string; data: string }) => {
-    if (cooldownRef.current || !scanning || data === lastScanned.current) return;
-    cooldownRef.current = true;
-    lastScanned.current = data;
+  // Actual lookup logic — called once we have a confirmed barcode value
+  const processBarcode = async (data: string) => {
     setScanning(false);
     setLoading(true);
     Vibration.vibrate(100);
 
     try {
-      // Always call API first — it is the authoritative source and prevents stale-cache misses
-      const res = await productApi.barcodeLookup(data);
+      // Always read live store state — avoids stale closure when the list fetch
+      // completes and re-renders the component between mount and first scan
+      const liveProducts = useProductStore.getState().products ?? [];
 
-      if (res.product) {
-        const p = res.product;
-        // Sync to local cache if this product isn't already there
-        if (!products.find(c => c.id === p.id)) {
-          setProducts([...products, p as any]);
-        }
-        setFoundProduct({
-          id: p.id,
-          name: p.name_bangla || (p as any).name_english || '',
-          brand: (p as any).brand,
-          unit: p.unit,
-          sale_price: p.sale_price,
-          barcode: data,
-          current_stock: p.current_stock,
-          mrp: (p as any).mrp,
-        });
-        setQuantity(1);
-        setProductModalVisible(true);
-        return;
-      }
+      // Diagnostic: log what the mobile sees so we can trace the mismatch
+      console.log('[Scan] barcode:', data);
+      console.log('[Scan] mobile shop_id:', shop?.id);
+      console.log('[Scan] products in store:', liveProducts.length);
+      console.log('[Scan] products with barcodes:', liveProducts.filter(p => (p as any).barcode).map(p => (p as any).barcode));
 
-      if (res.globalProduct) {
-        const g = res.globalProduct;
-        setFoundProduct({
-          id: g.id,
-          name: g.name_english,
-          brand: g.brand,
-          origin_country: g.origin_country,
-          unit: g.unit,
-          sale_price: g.standard_price || g.standard_mrp,
-          barcode: data,
-          mrp: g.standard_mrp,
-        });
-        setQuantity(1);
-        setProductModalVisible(true);
-        return;
-      }
-
-      // Confirmed not in DB — open add form
-      setNotFoundBarcode(data);
-      setProductCategory(isCosmetics ? 'Skin Care' : 'other');
-      setNewProductModal(true);
-
-    } catch (e) {
-      // Offline fallback — check local cache before giving up
-      const localMatch = products.find(p => (p as any).barcode === data);
+      // Step 1: local cache (fast path; populated by productApi.list() on open)
+      const localMatch = liveProducts.find(p => (p as any).barcode === data);
       if (localMatch) {
         setFoundProduct({
           id: localMatch.id,
@@ -172,12 +139,153 @@ export default function BarcodeScannerScreen() {
         setProductModalVisible(true);
         return;
       }
-      console.warn('Barcode lookup error:', e);
+
+      // Step 2: backend barcode API
+      let apiFound = false;
+      try {
+        const res = await productApi.barcodeLookup(data);
+        if (res?.product) {
+          const p = res.product;
+          setProducts([...liveProducts, p as any]);
+          setFoundProduct({
+            id: p.id,
+            name: p.name_bangla || (p as any).name_english || '',
+            brand: (p as any).brand,
+            unit: p.unit,
+            sale_price: p.sale_price,
+            barcode: data,
+            current_stock: p.current_stock,
+            mrp: (p as any).mrp,
+          });
+          setQuantity(1);
+          setProductModalVisible(true);
+          apiFound = true;
+          return;
+        }
+        if (res?.globalProduct) {
+          const g = res.globalProduct;
+          setFoundProduct({
+            id: g.id,
+            name: g.name_english,
+            brand: g.brand,
+            origin_country: g.origin_country,
+            unit: g.unit,
+            sale_price: g.standard_price || g.standard_mrp,
+            barcode: data,
+            mrp: g.standard_mrp,
+          });
+          setQuantity(1);
+          setProductModalVisible(true);
+          apiFound = true;
+          return;
+        }
+      } catch (apiErr) {
+        if (apiErr instanceof ApiError) {
+          if (apiErr.status === 404) {
+            console.log('[Barcode Lookup] Not in backend:', data);
+          } else {
+            console.error('[Barcode Lookup] API error:', apiErr.status, JSON.stringify(apiErr.details ?? apiErr.message));
+          }
+        } else if (apiErr instanceof OfflineError) {
+          console.warn('[Barcode Lookup] Offline — skipping backend lookup');
+        } else {
+          console.error('[Barcode Lookup] Unexpected error:', apiErr);
+        }
+      }
+
+      if (apiFound) return;
+
+      // Step 3: background product list might be stale — try a targeted backend search
+      // as a last resort before declaring the product truly absent.
+      if (shop?.id) {
+        try {
+          const searchResults = await productApi.search(data);
+          const exactMatch = searchResults.find(p => (p as any).barcode === data);
+          if (exactMatch) {
+            const fresh = [...useProductStore.getState().products, exactMatch as any];
+            setProducts(fresh);
+            setFoundProduct({
+              id: exactMatch.id,
+              name: exactMatch.name_bangla || (exactMatch as any).name_english || '',
+              brand: (exactMatch as any).brand,
+              unit: exactMatch.unit,
+              sale_price: exactMatch.sale_price,
+              barcode: data,
+              current_stock: exactMatch.current_stock,
+              mrp: (exactMatch as any).mrp,
+            });
+            setQuantity(1);
+            setProductModalVisible(true);
+            return;
+          }
+        } catch (searchErr) {
+          if (!(searchErr instanceof OfflineError)) {
+            console.warn('[Scan] Search fallback error:', searchErr);
+          }
+        }
+      }
+
+      // All sources exhausted — product truly not found
+      setNotFoundBarcode(data);
+      setProductCategory(isCosmetics ? 'Skin Care' : 'other');
+      setNewProductModal(true);
+
+    } catch (e) {
+      console.error('[Barcode Scan] Unexpected error:', e);
       setNotFoundBarcode(data);
       setNewProductModal(true);
     } finally {
       setLoading(false);
     }
+  };
+
+  // Filter/debounce layer — called on every camera frame that contains a barcode
+  const handleBarcodeScan = ({ data, type }: { type: string; data: string }) => {
+    if (cooldownRef.current || !scanning) return;
+
+    // Reject reads that are too short to be a real product barcode
+    const isNumeric = /^\d+$/.test(data);
+    if (isNumeric && data.length < 8) return;
+
+    // EAN-13 / UPC-A are the primary product barcode formats — trust them immediately
+    const isPrimary = type === 'ean13' || type === 'upc_a'
+      || (isNumeric && data.length === 13)
+      || (isNumeric && data.length === 12);
+
+    if (isPrimary) {
+      if (data === lastScanned.current) return;
+      cooldownRef.current = true;
+      lastScanned.current = data;
+      if (bufferTimerRef.current) { clearTimeout(bufferTimerRef.current); bufferTimerRef.current = null; }
+      scanBufferRef.current.clear();
+      processBarcode(data);
+      return;
+    }
+
+    // Shorter formats (EAN-8, UPC-E, Code128, etc.) — require 2+ consistent reads
+    // within a 600 ms window to filter out accidental secondary-barcode hits
+    const count = (scanBufferRef.current.get(data) ?? 0) + 1;
+    scanBufferRef.current.set(data, count);
+
+    if (bufferTimerRef.current) clearTimeout(bufferTimerRef.current);
+    bufferTimerRef.current = setTimeout(() => {
+      bufferTimerRef.current = null;
+      if (cooldownRef.current || !scanning) { scanBufferRef.current.clear(); return; }
+
+      // Pick the barcode seen most often in this window
+      let bestCode = '';
+      let bestCount = 0;
+      scanBufferRef.current.forEach((c, code) => {
+        if (c > bestCount) { bestCount = c; bestCode = code; }
+      });
+      scanBufferRef.current.clear();
+
+      if (bestCode && bestCount >= 2 && bestCode !== lastScanned.current) {
+        cooldownRef.current = true;
+        lastScanned.current = bestCode;
+        processBarcode(bestCode);
+      }
+    }, 600);
   };
 
   const resumeScanning = () => {
@@ -186,6 +294,8 @@ export default function BarcodeScannerScreen() {
     setProductModalVisible(false);
     setNewProductModal(false);
     resetForm();
+    if (bufferTimerRef.current) { clearTimeout(bufferTimerRef.current); bufferTimerRef.current = null; }
+    scanBufferRef.current.clear();
     setTimeout(() => {
       cooldownRef.current = false;
       lastScanned.current = '';
@@ -269,14 +379,17 @@ export default function BarcodeScannerScreen() {
           );
           return;
         }
-      } catch {
-        // Offline — check local cache
-        const localDup = products.find(p => (p as any).barcode === notFoundBarcode);
-        if (localDup) {
-          setLoading(false);
-          Alert.alert('সতর্কতা', 'এই বারকোড দিয়ে পণ্য আগে থেকেই আছে।');
-          return;
+      } catch (dupErr) {
+        if (dupErr instanceof OfflineError) {
+          // Offline — check live store for duplicate
+          const localDup = useProductStore.getState().products.find(p => (p as any).barcode === notFoundBarcode);
+          if (localDup) {
+            setLoading(false);
+            Alert.alert('সতর্কতা', 'এই বারকোড দিয়ে পণ্য আগে থেকেই আছে।');
+            return;
+          }
         }
+        // ApiError 404 = no duplicate found; other errors = proceed with create
       }
     }
 
@@ -287,42 +400,72 @@ export default function BarcodeScannerScreen() {
       const stock = parseFloat(openingStock) || 0;
       const minAlert = parseFloat(minStockAlert) || 5;
 
-      const newProduct = {
-        id: uuidv4(),
-        shop_id: shop?.id,
+      const localId = uuidv4();
+
+      // Payload sent to the backend — never includes a locally-generated id
+      const createPayload = {
+        shop_id: shop!.id,
         name_bangla: newProductName,
         name_english: newProductName,
         aliases: productBrand ? [productBrand.toLowerCase()] : [],
-        unit: newProductUnit,
+        unit: newProductUnit as import('@/types').Unit,
         category: productCategory || 'other',
         sale_price: salePrice,
         purchase_price: costPrice,
+        cost_price: costPrice,
         current_stock: stock,
         min_stock_alert: minAlert,
         is_active: true,
-        barcode: notFoundBarcode,
-        brand: productBrand || null,
-        origin_country: productCountry || null,
-        expiry_date: productExpiry || null,
+        barcode: notFoundBarcode || undefined,
+        brand: productBrand || undefined,
+        origin_country: productCountry || undefined,
+        expiry_date: productExpiry || undefined,
         mrp: mrp,
-        size: productSize || null,
+        size: productSize || undefined,
+        discount_percent: 0,
+        is_volatile: false,
+        is_bulk: false,
+        wholesale_cash_price: 0,
+        wholesale_credit_price: 0,
+        vat_rate: 0,
+        vat_exempt: false,
       };
 
-      // Save to local store immediately
-      setProducts([...products, newProduct as any]);
+      // Optimistic local entry while API call is in flight
+      const optimistic = { ...createPayload, id: localId, updated_at: new Date().toISOString() };
+      setProducts([...useProductStore.getState().products, optimistic as any]);
 
       // Sync to backend
+      let finalId = localId;
       try {
-        const created = await productApi.create(newProduct);
-        setProducts(prev => prev.map((p: any) => p.id === newProduct.id ? created : p));
-      } catch {
-        console.warn('Offline — saved locally');
+        const created = await productApi.create(createPayload);
+        finalId = created.id;
+        const afterCreate = useProductStore.getState().products;
+        setProducts(afterCreate.map((p: any) => p.id === localId ? created : p));
+      } catch (createErr: any) {
+        if (createErr instanceof ApiError) {
+          // Roll back the optimistic entry so a stale record isn't left in the store
+          const afterFail = useProductStore.getState().products;
+          setProducts(afterFail.filter((p: any) => p.id !== localId));
+          const body = createErr.details as any;
+          const fieldErrors: string[] = Array.isArray(body?.errorDetails)
+            ? body.errorDetails.map((e: any) => `• ${e.field ?? e.path ?? ''}: ${e.message ?? e.msg ?? JSON.stringify(e)}`)
+            : [];
+          const alertMsg = fieldErrors.length > 0
+            ? `${createErr.message}\n\n${fieldErrors.join('\n')}`
+            : createErr.message;
+          console.error('[Product Create] API error:', createErr.status, JSON.stringify(body, null, 2));
+          Alert.alert('ত্রুটি', alertMsg);
+          return;
+        }
+        // OfflineError or unknown — keep the local record
+        console.warn('[Product Create] Offline or unknown error — saved locally only', createErr);
       }
 
       // Add to bill
       const item = {
         product_name: newProductName,
-        product_id: newProduct.id,
+        product_id: finalId,
         quantity: 1,
         unit: newProductUnit,
         unit_price: salePrice,

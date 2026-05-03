@@ -256,6 +256,7 @@ const handleSaveDraft = async () => {
       payment_method: paymentMethod,
       discount_type: discountType ?? undefined,
       discount_value: parseFloat(discountValue) || 0,
+      vat_rate: 0,
     });
     setLastInvoice({
       number: res.invoice_number,

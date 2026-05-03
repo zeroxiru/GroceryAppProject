@@ -18,6 +18,7 @@ export interface BillingPayload {
   discount_type?: 'percentage' | 'amount';
   discount_value?: number;
   notes?: string;
+  vat_rate?: number;
 }
 
 export interface BillingResponse {

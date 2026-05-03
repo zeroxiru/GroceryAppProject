@@ -8,6 +8,7 @@ import { Ionicons } from '@expo/vector-icons';
 import { CameraView, Camera } from 'expo-camera';
 import { useAuthStore, useProductStore } from '@/store';
 import { productApi, BulkImportRow } from '@/services/api/productApi';
+import { ApiError, OfflineError } from '@/services/api/client';
 import { inventoryApi, StockMovement, MovementType } from '@/services/api/inventoryApi';
 import { suppliersApi } from '@/services/api/suppliersApi';
 import { Supplier } from '@/types';
@@ -76,7 +77,7 @@ export default function InventoryScreen() {
     if (!shop) return;
     setLoading(true);
     try {
-      const data = await productApi.list();
+      const data = await productApi.listAll();
       setProducts(data);
     } catch { /* use cached */ }
     finally { setLoading(false); }
@@ -370,23 +371,32 @@ function ProductModal({ visible, product, shopId, shopType, shopDefaultDiscount,
     }
     setSaving(true);
     try {
+      const purchasePriceNum = parseFloat(purchasePrice) || 0;
       const payload: any = {
         shop_id: shopId,
         name_bangla: name || nameEn,
         name_english: nameEn || name,
-        brand: brand || null,
-        size: size || null,
+        brand: brand || undefined,
+        size: size || undefined,
         unit,
         category: category || 'other',
         sale_price: parseFloat(salePrice) || 0,
-        purchase_price: parseFloat(purchasePrice) || 0,
-        mrp: parseFloat(mrp) || null,
+        purchase_price: purchasePriceNum,
+        cost_price: purchasePriceNum,
+        mrp: parseFloat(mrp) || 0,
         current_stock: parseFloat(stock) || 0,
         min_stock_alert: parseFloat(minStock) || 5,
-        barcode: barcode || null,
-        origin_country: originCountry || null,
-        expiry_date: expiryDate || null,
+        barcode: barcode || undefined,
+        origin_country: originCountry || undefined,
+        expiry_date: expiryDate || undefined,
         aliases: brand ? [brand.toLowerCase()] : [],
+        discount_percent: 0,
+        is_volatile: false,
+        is_bulk: false,
+        wholesale_cash_price: 0,
+        wholesale_credit_price: 0,
+        vat_rate: 0,
+        vat_exempt: false,
       };
       if (product) {
         const updated = await productApi.update(product.id, payload);
@@ -408,19 +418,22 @@ function ProductModal({ visible, product, shopId, shopType, shopDefaultDiscount,
               setSaving(false);
               return;
             }
-          } catch {
-            const store = useProductStore.getState();
-            const localDup = store.products.find(p => (p as any).barcode === barcode);
-            if (localDup) {
-              Alert.alert(
-                isCosmetics ? 'Duplicate Barcode' : 'বারকোড আগে থেকেই আছে',
-                isCosmetics
-                  ? `Barcode is already used by: "${localDup.name_english || localDup.name_bangla}"`
-                  : `এই বারকোড আগে থেকে ব্যবহৃত: "${localDup.name_bangla || localDup.name_english}"`,
-              );
-              setSaving(false);
-              return;
+          } catch (dupErr) {
+            if (dupErr instanceof OfflineError) {
+              const store = useProductStore.getState();
+              const localDup = store.products.find(p => (p as any).barcode === barcode);
+              if (localDup) {
+                Alert.alert(
+                  isCosmetics ? 'Duplicate Barcode' : 'বারকোড আগে থেকেই আছে',
+                  isCosmetics
+                    ? `Barcode is already used by: "${localDup.name_english || localDup.name_bangla}"`
+                    : `এই বারকোড আগে থেকে ব্যবহৃত: "${localDup.name_bangla || localDup.name_english}"`,
+                );
+                setSaving(false);
+                return;
+              }
             }
+            // ApiError 404 = no duplicate; proceed with create
           }
         }
         const created = await productApi.create({ ...payload, is_active: true });

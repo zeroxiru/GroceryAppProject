@@ -1,4 +1,4 @@
-import { parseWithClaude, ClaudeNLUResult } from './claudeNLU';
+import { parseWithClaude, claudeResultToSaleItems } from './claudeNLU';
 import { NLUService, createNLUService } from './nluService';
 import { MultiItemParser } from './multiItemParser';
 import { Product, ParsedCommand, SaleItem } from '../../types';
@@ -22,15 +22,17 @@ export async function smartParse(
   action: 'sale' | 'purchase';
 }> {
   // Try Claude first
-  const claudeResult = await parseWithClaude(rawText, products);
+  const claudeResult = await parseWithClaude(rawText);
 
   if (claudeResult && claudeResult.items.length > 0) {
     console.log('Using Claude NLU ✓');
-    // Convert to ParsedCommand format for compatibility
+    const saleItems = claudeResultToSaleItems(claudeResult);
     const commands: ParsedCommand[] = claudeResult.items.map(item => ({
       action: claudeResult.action,
       product_name: item.product_name,
-      matched_product: products.find(p => p.id === item.product_id),
+      matched_product: products.find(p =>
+        p.name_bangla === item.product_name || p.name_english === item.product_name
+      ),
       quantity: item.quantity,
       unit: item.unit as any,
       price: item.unit_price,
@@ -38,9 +40,9 @@ export async function smartParse(
     }));
 
     return {
-      items: claudeResult.items,
+      items: saleItems,
       commands,
-      isMulti: claudeResult.isMulti,
+      isMulti: claudeResult.items.length > 1,
       usedAI: true,
       action: claudeResult.action,
     };

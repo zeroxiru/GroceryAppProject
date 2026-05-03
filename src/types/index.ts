@@ -110,6 +110,7 @@ export interface Transaction {
   customer_id?: string;
   payment_method?: PaymentMethod;
   notes?: string;
+  voice_raw_text?: string;
   voided?: boolean;
   is_synced: boolean;
   created_at: string;

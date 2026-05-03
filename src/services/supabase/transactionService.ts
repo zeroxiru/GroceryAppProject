@@ -30,25 +30,28 @@ export const transactionService = {
     const { shop, user } = useAuthStore.getState();
     if (!shop || !user) throw new Error('Not authenticated');
 
+    // Ensure vat_rate is always present so the backend resolves the correct
+    // create_invoice overload (9-param version with p_vat_rate).
+    const normalisedPayload: BillingPayload = { vat_rate: 0, ...payload };
+
     // Optimistic local stock update
-    for (const item of payload.items) {
+    for (const item of normalisedPayload.items) {
       if (item.product_id) {
         useProductStore.getState().updateStock(item.product_id, -item.quantity);
       }
     }
 
     try {
-      const res = await billingApi.create(payload);
+      const res = await billingApi.create(normalisedPayload);
       const txns = billingResponseToTransactions(res, shop.id, user.id, user.name);
       useTransactionStore.getState().addTransactions(txns);
       return res;
     } catch (e) {
       if (e instanceof OfflineError) {
         console.warn('Offline — billing queued for sync');
-        useTransactionStore.getState().addPendingBill(payload);
-        // Return synthetic response for receipt display
+        useTransactionStore.getState().addPendingBill(normalisedPayload);
         const syntheticInvoice = `INV-${format(new Date(), 'yyyyMMdd')}-${Math.floor(1000 + Math.random() * 9000)}`;
-        const subtotal = payload.items.reduce((s, i) => s + i.quantity * i.unit_price, 0);
+        const subtotal = normalisedPayload.items.reduce((s, i) => s + i.quantity * i.unit_price, 0);
         return {
           invoice_number: syntheticInvoice,
           created_at: new Date().toISOString(),
@@ -56,11 +59,11 @@ export const transactionService = {
           subtotal,
           discount_amount: 0,
           net_total: subtotal,
-          payment_method: payload.payment_method,
+          payment_method: normalisedPayload.payment_method,
         };
       }
       // Revert optimistic stock update on error
-      for (const item of payload.items) {
+      for (const item of normalisedPayload.items) {
         if (item.product_id) {
           useProductStore.getState().updateStock(item.product_id, +item.quantity);
         }

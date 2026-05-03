@@ -36,9 +36,26 @@ export interface BulkImportResult {
   errors?: { row: number; message: string }[];
 }
 
+const PAGE_SIZE = 200; // matches the backend's internal cap per page
+
 export const productApi = {
-  async list(page = 1, limit = 200): Promise<Product[]> {
+  /** Fetch a single page (low-level). Prefer listAll() for most callers. */
+  async list(page = 1, limit = PAGE_SIZE): Promise<Product[]> {
     return apiRequest<Product[]>('GET', `/products?page=${page}&limit=${limit}`);
+  },
+
+  /** Fetch every product for the shop by walking all pages until exhausted. */
+  async listAll(): Promise<Product[]> {
+    let page = 1;
+    const all: Product[] = [];
+    while (page <= 50) { // safety cap: 50 × 200 = 10 000 products max
+      const batch = await apiRequest<Product[]>('GET', `/products?page=${page}&limit=${PAGE_SIZE}`);
+      if (!Array.isArray(batch) || batch.length === 0) break;
+      all.push(...batch);
+      if (batch.length < PAGE_SIZE) break; // last page — got fewer than a full batch
+      page++;
+    }
+    return all;
   },
 
   async search(q: string): Promise<Product[]> {

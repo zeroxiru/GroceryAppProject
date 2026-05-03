@@ -6,24 +6,32 @@ import { v4 as uuidv4 } from 'uuid';
 
 export const productService = {
   async fetchProducts(): Promise<Product[]> {
-    const { products: cached, lastFetched } = useProductStore.getState();
+    const { products: cached } = useProductStore.getState();
 
-    if (cached.length > 0 && lastFetched) {
-      const age = Date.now() - new Date(lastFetched).getTime();
-      if (age < 5 * 60 * 1000) return cached;
+    const doFetch = async () => {
+      const fresh = await productApi.listAll();
+      useProductStore.getState().setProducts(fresh);
+      return fresh;
+    };
+
+    if (cached.length > 0) {
+      // Serve cache immediately; refresh in background so the count updates within seconds
+      doFetch().catch(e => {
+        if (!(e instanceof OfflineError)) console.warn('fetchProducts bg refresh:', e);
+      });
+      return cached;
     }
 
+    // No cache — wait for first load
     try {
-      const products = await productApi.list();
-      useProductStore.getState().setProducts(products);
-      return products;
+      return await doFetch();
     } catch (e) {
       if (e instanceof OfflineError) {
-        console.warn('Offline — using cached products:', cached.length);
-        return cached.length > 0 ? cached : [];
+        console.warn('Offline — no cached products');
+        return [];
       }
       console.warn('fetchProducts error:', e);
-      return cached.length > 0 ? cached : [];
+      return [];
     }
   },
 

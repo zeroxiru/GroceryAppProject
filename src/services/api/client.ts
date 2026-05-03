@@ -7,7 +7,11 @@ export class OfflineError extends Error {
 }
 
 export class ApiError extends Error {
-  constructor(public status: number, message: string) {
+  constructor(
+    public status: number,
+    message: string,
+    public details?: unknown,
+  ) {
     super(message);
     this.name = 'ApiError';
   }
@@ -76,8 +80,20 @@ export async function apiRequest<T>(
 
   if (!res.ok) {
     let message = `HTTP ${res.status}`;
-    try { const e = await res.json(); message = e.message ?? e.error ?? message; } catch {}
-    throw new ApiError(res.status, message);
+    let details: unknown;
+    try {
+      const e = await res.json();
+      message = e.message ?? e.error ?? message;
+      details = e;
+    } catch {}
+    // 404 is expected for "not found" lookups — log as info, everything else as error
+    if (res.status === 404) {
+      console.log(`[API] ${method} ${path} → 404 (not found)`);
+    } else {
+      console.error(`[API] ${method} ${path} → ${res.status}`);
+      console.error('[API] response body:', JSON.stringify(details, null, 2));
+    }
+    throw new ApiError(res.status, message, details);
   }
 
   if (res.status === 204) return undefined as T;

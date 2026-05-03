@@ -393,6 +393,36 @@ function ProductModal({ visible, product, shopId, shopType, shopDefaultDiscount,
         const store = useProductStore.getState();
         store.setProducts(store.products.map(p => p.id === product.id ? { ...p, ...updated } : p));
       } else {
+        // Duplicate barcode guard before creating
+        if (barcode) {
+          try {
+            const dupCheck = await productApi.barcodeLookup(barcode);
+            if (dupCheck.product) {
+              const ex = dupCheck.product;
+              Alert.alert(
+                isCosmetics ? 'Duplicate Barcode' : 'বারকোড আগে থেকেই আছে',
+                isCosmetics
+                  ? `Barcode is already used by: "${ex.name_english || ex.name_bangla}"`
+                  : `এই বারকোড আগে থেকে ব্যবহৃত: "${ex.name_bangla || ex.name_english}"`,
+              );
+              setSaving(false);
+              return;
+            }
+          } catch {
+            const store = useProductStore.getState();
+            const localDup = store.products.find(p => (p as any).barcode === barcode);
+            if (localDup) {
+              Alert.alert(
+                isCosmetics ? 'Duplicate Barcode' : 'বারকোড আগে থেকেই আছে',
+                isCosmetics
+                  ? `Barcode is already used by: "${localDup.name_english || localDup.name_bangla}"`
+                  : `এই বারকোড আগে থেকে ব্যবহৃত: "${localDup.name_bangla || localDup.name_english}"`,
+              );
+              setSaving(false);
+              return;
+            }
+          }
+        }
         const created = await productApi.create({ ...payload, is_active: true });
         const store = useProductStore.getState();
         store.setProducts([...store.products, created]);

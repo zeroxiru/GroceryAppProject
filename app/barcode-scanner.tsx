@@ -108,34 +108,15 @@ export default function BarcodeScannerScreen() {
     Vibration.vibrate(100);
 
     try {
-      // Step 1: Check local cache
-     if (!products || products.length === 0) {
-  console.log('Products not loaded yet');
-  // Continue to API lookup instead of failing
-} else {
-  const localMatch = products.find(p => (p as any).barcode === data);
-  if (localMatch) {
-    setFoundProduct({
-      id: localMatch.id,
-      name: localMatch.name_bangla || (localMatch as any).name_english || '',
-      brand: (localMatch as any).brand,
-      unit: localMatch.unit,
-      sale_price: localMatch.sale_price,
-      barcode: data,
-      current_stock: localMatch.current_stock,
-      mrp: (localMatch as any).mrp,
-    });
-    setQuantity(1);
-    setProductModalVisible(true);
-    return;
-  }
-}
-
-      // Step 2: Single API call replaces 3-tier Supabase lookup
+      // Always call API first — it is the authoritative source and prevents stale-cache misses
       const res = await productApi.barcodeLookup(data);
 
       if (res.product) {
         const p = res.product;
+        // Sync to local cache if this product isn't already there
+        if (!products.find(c => c.id === p.id)) {
+          setProducts([...products, p as any]);
+        }
         setFoundProduct({
           id: p.id,
           name: p.name_bangla || (p as any).name_english || '',
@@ -168,12 +149,29 @@ export default function BarcodeScannerScreen() {
         return;
       }
 
-      // Step 4: Not found — open add form
+      // Confirmed not in DB — open add form
       setNotFoundBarcode(data);
       setProductCategory(isCosmetics ? 'Skin Care' : 'other');
       setNewProductModal(true);
 
     } catch (e) {
+      // Offline fallback — check local cache before giving up
+      const localMatch = products.find(p => (p as any).barcode === data);
+      if (localMatch) {
+        setFoundProduct({
+          id: localMatch.id,
+          name: localMatch.name_bangla || (localMatch as any).name_english || '',
+          brand: (localMatch as any).brand,
+          unit: localMatch.unit,
+          sale_price: localMatch.sale_price,
+          barcode: data,
+          current_stock: localMatch.current_stock,
+          mrp: (localMatch as any).mrp,
+        });
+        setQuantity(1);
+        setProductModalVisible(true);
+        return;
+      }
       console.warn('Barcode lookup error:', e);
       setNotFoundBarcode(data);
       setNewProductModal(true);
@@ -235,6 +233,53 @@ export default function BarcodeScannerScreen() {
       return;
     }
     setLoading(true);
+
+    // Guard against duplicates: re-check the barcode one final time before creating
+    if (notFoundBarcode) {
+      try {
+        const dupCheck = await productApi.barcodeLookup(notFoundBarcode);
+        if (dupCheck.product) {
+          const p = dupCheck.product;
+          if (!products.find(c => c.id === p.id)) {
+            setProducts([...products, p as any]);
+          }
+          setLoading(false);
+          Alert.alert(
+            'পণ্য আগে থেকেই আছে',
+            `"${p.name_bangla || (p as any).name_english}" এই বারকোড দিয়ে ইতিমধ্যে ডেটাবেজে আছে।`,
+            [{
+              text: 'পণ্য দেখুন',
+              onPress: () => {
+                setNewProductModal(false);
+                resetForm();
+                setFoundProduct({
+                  id: p.id,
+                  name: p.name_bangla || (p as any).name_english || '',
+                  brand: (p as any).brand,
+                  unit: p.unit,
+                  sale_price: p.sale_price,
+                  barcode: notFoundBarcode,
+                  current_stock: p.current_stock,
+                  mrp: (p as any).mrp,
+                });
+                setQuantity(1);
+                setProductModalVisible(true);
+              },
+            }],
+          );
+          return;
+        }
+      } catch {
+        // Offline — check local cache
+        const localDup = products.find(p => (p as any).barcode === notFoundBarcode);
+        if (localDup) {
+          setLoading(false);
+          Alert.alert('সতর্কতা', 'এই বারকোড দিয়ে পণ্য আগে থেকেই আছে।');
+          return;
+        }
+      }
+    }
+
     try {
       const salePrice = parseFloat(newProductPrice) || 0;
       const costPrice = parseFloat(purchasePrice) || salePrice;

@@ -3,7 +3,7 @@ import { View, Text, TouchableOpacity, ScrollView, Modal, TextInput, ActivityInd
 import { Ionicons } from '@expo/vector-icons';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import Toast from 'react-native-toast-message';
-import { useAuthStore, useProductStore, useCartStore, CartItem } from '@/store';
+import { useAuthStore, useProductStore, useCartStore, cartTotals, CartItem } from '@/store';
 import { transactionService } from '@/services/supabase/transactionService';
 import { voiceService } from '@/services/voice/voiceService';
 import { PaymentMethod } from '@/types';
@@ -57,9 +57,7 @@ export default function CartBillBar({ onUnmatchedProduct, onCheckoutSuccess, onA
 
   if (!cart || cart.items.length === 0) return null; // empty cart — bar hidden entirely, never shown at ৳0
 
-  const checkedTotal = cart.items.filter(i => i.checked).reduce((s, i) => s + i.total, 0);
-  const discountAmount = calculateDiscount(checkedTotal, cart.discountType, parseFloat(cart.discountValue) || 0);
-  const netTotal = checkedTotal - discountAmount;
+  const { subtotal: checkedTotal, discount: discountAmount, net: netTotal } = cartTotals(cart);
 
   const openEdit = (index: number) => {
     const item = cart.items[index];
@@ -104,7 +102,30 @@ export default function CartBillBar({ onUnmatchedProduct, onCheckoutSuccess, onA
       completeCart(cart.id); // closes this tab; a fresh empty one takes its place if it was the only one
       await voiceService.speak(`বিল তৈরি হয়েছে। মোট ${Math.round(netTotal)} টাকা।`);
     } catch (e: any) {
-      Alert.alert('ত্রুটি', e.message);
+      // The server refuses a line whose product has no stock. Say so in plain
+      // Bangla and offer to drop just that line, instead of showing the raw
+      // English message and leaving the shopkeeper to work out what to remove.
+      const m = /Insufficient stock for (.+?):/.exec(e?.message ?? '');
+      if (m) {
+        const name = m[1];
+        Alert.alert(
+          'স্টকে নেই',
+          `"${name}" এর স্টক নেই, তাই বিল হয়নি।`,
+          [
+            { text: 'বাতিল', style: 'cancel' },
+            {
+              text: 'এটি বাদ দিন',
+              style: 'destructive',
+              onPress: () => {
+                const idx = cart.items.findIndex(i => i.product_name === name);
+                if (idx >= 0) removeItem(cart.id, idx);
+              },
+            },
+          ],
+        );
+      } else {
+        Alert.alert('ত্রুটি', e.message);
+      }
     } finally {
       setSaving(false);
     }
@@ -169,10 +190,10 @@ export default function CartBillBar({ onUnmatchedProduct, onCheckoutSuccess, onA
             ))}
 
             {/* Unmatched product warning */}
-            {cart.items.some(i => !i.product_id) && (
+            {cart.items.some(i => !i.product_id && !i.custom) && (
               <TouchableOpacity
                 style={styles.warnBox}
-                onPress={() => { const u = cart.items.find(i => !i.product_id); if (u) onUnmatchedProduct(u); }}
+                onPress={() => { const u = cart.items.find(i => !i.product_id && !i.custom); if (u) onUnmatchedProduct(u); }}
               >
                 <Ionicons name="warning-outline" size={14} color="#92400E" />
                 <Text style={styles.warnText}>কিছু পণ্য স্টকে নেই — ট্যাপ করে যোগ করুন</Text>
@@ -351,7 +372,7 @@ export default function CartBillBar({ onUnmatchedProduct, onCheckoutSuccess, onA
 
 const styles = StyleSheet.create({
   bar: {
-    position: 'absolute', left: 16, right: 16, bottom: 72,
+    position: 'absolute', left: 16, right: 16, bottom: 12, // this screen's container ends at the tab bar, so 12 = just above it
     flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between',
     backgroundColor: COLORS.primary, borderRadius: 18, paddingHorizontal: 18, paddingVertical: 12,
     shadowColor: '#000', shadowOpacity: 0.2, shadowOffset: { width: 0, height: 4 }, shadowRadius: 10, elevation: 6,

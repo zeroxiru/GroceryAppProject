@@ -5,6 +5,7 @@ import {
   Vibration, ScrollView,
 } from 'react-native';
 import { CameraView, Camera } from 'expo-camera';
+import Toast from 'react-native-toast-message';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
 import { router } from 'expo-router';
@@ -350,6 +351,10 @@ export default function BarcodeScannerScreen() {
 
   const handleAddToBill = () => {
     if (!foundProduct) return;
+    // The server refuses a bill line for a product with no stock — say so now, not at checkout.
+    if (foundProduct.current_stock !== undefined && Number(foundProduct.current_stock) <= 0) {
+      Toast.show({ type: 'info', text1: `${foundProduct.name} — স্টকে নেই`, text2: 'বিল করলে ব্যর্থ হতে পারে' });
+    }
     const item = {
       product_name: foundProduct.name,
       product_id: foundProduct.id,

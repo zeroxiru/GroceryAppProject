@@ -23,6 +23,9 @@ import VoiceDictationButton from '@/components/pos/VoiceDictationButton';
 import QueueTabs from '@/components/pos/QueueTabs';
 import CartBillBar, { PAYMENT_METHODS } from '@/components/pos/CartBillBar';
 import { useCartStore, CartItem } from '@/store';
+import { useCatalog } from '@/hooks/useCatalog';
+import CategoryChipRail, { RailCategory } from '@/components/pos/CategoryChipRail';
+import ProductBrowseList from '@/components/pos/ProductBrowseList';
 
 const GROCERY_CATEGORY_LABELS: Record<string, string> = {
   drink:     '🥤 পানীয়',
@@ -48,7 +51,7 @@ const GROCERY_CATEGORY_LABELS: Record<string, string> = {
 export default function HomeScreen() {
   const { shop, user } = useAuthStore();
   const { products = [] } = useProductStore();
-  const { todayTransactions =[] } = useTransactionStore();
+  const { todayTransactions =[], pendingBills = [] } = useTransactionStore();
   const { setStatus, setRawText } = useVoiceStore();
   // The cart that's currently receiving adds — whichever customer tab is
   // active in QueueTabs. Every add-to-cart path below targets this cart,
@@ -77,8 +80,7 @@ export default function HomeScreen() {
 
   const nluRef = useRef(createNLUService(products));
   const multiParserRef = useRef(new MultiItemParser(nluRef.current));
-  const [quickCategory, setQuickCategory] = useState<string | null>(null);
-  const [topProducts, setTopProducts] = useState<Record<string, any[]>>({});
+  const [selectedCategory, setSelectedCategory] = useState<string | null>(null);
   const params = useLocalSearchParams();
 
   useEffect(() => {
@@ -145,7 +147,6 @@ useEffect(() => {
   }, [todayTransactions, products]);
 
   const todaySales = (todayTransactions ?? []).filter(t => t.type === 'sale').reduce((s, t) => s + (t?.total_amount ?? 0), 0);
-  const todayPurchases = (todayTransactions?? []).filter(t => t.type === 'purchase').reduce((s, t) => s + (t?.total_amount ?? 0), 0);
 
   const addToActiveCart = (items: CartItem[]) => {
     const cartId = useCartStore.getState().activeCartId;
@@ -245,48 +246,37 @@ useEffect(() => {
     } catch (e: any) { Alert.alert('ত্রুটি', e.message); }
   };
  
-const getTopProductsForCategory = (category: string) => {
-  // Get products for this category
-  const catProducts = products.filter(p => p?.category === category);
+  // ── Product browse data (category rail + list) ──────────────────────────
+  // Only active products; categories come from the products themselves so a
+  // chip can never lead to an empty list, and the count on each chip is live.
+  const activeProducts = React.useMemo(() => (products ?? []).filter(p => p && p.is_active !== false), [products]);
 
-  // Sort by how many times sold today (from transactions)
-  const salesCount: Record<string, number> = {};
-  todayTransactions.forEach(t => {
-    const name = t?.product_name;
-    if (name) salesCount[name] = (salesCount[name] ?? 0) + 1;
-  });
+  // The catalog supplies proper Bangla category names; useCatalog() serves the
+  // cached copy instantly and only re-fetches when it's older than 24 h.
+  const { categories: catalogCategories } = useCatalog();
+  const railCategories = React.useMemo<RailCategory[]>(() => {
+    const counts: Record<string, number> = {};
+    for (const p of activeProducts) if (p.category) counts[p.category] = (counts[p.category] ?? 0) + 1;
+    return Object.entries(counts)
+      .sort((a, b) => b[1] - a[1])
+      .map(([key, count]) => ({
+        key,
+        count,
+        label: catalogCategories.find(c => c.name === key)?.display_name_bangla
+          ?? GROCERY_CATEGORY_LABELS[key]
+          ?? key.replace(/_/g, ' '),
+      }));
+  }, [activeProducts, catalogCategories]);
 
-  return catProducts
-    .sort((a, b) => (salesCount[b?.name_bangla] ?? 0) - (salesCount[a?.name_bangla] ?? 0))
-    .slice(0, 5);
-};
-const quickCategories = (shop?.shop_type === 'cosmetics') ? [
-  { key: 'Hair Care', label: '💆 শ্যাম্পু' },
-  { key: 'Skin Care', label: '🧴 স্কিন কেয়ার' },
-  { key: 'Face Care', label: '🫧 ফেস কেয়ার' },
-  { key: 'Body Care', label: '🛁 বডি কেয়ার' },
-  { key: 'Baby Care', label: '👶 বেবি' },
-  { key: 'Perfume', label: '🌸 পারফিউম' },
-] : (shop?.shop_type === 'imported') ? [
-  { key: 'Chocolates', label: '🍫 চকলেট' },
-  { key: 'Instant Noodles', label: '🍜 নুডলস' },
-  { key: 'cosmetics', label: '🧴 কসমেটিক্স' },
-  { key: 'Snacks', label: '🍪 স্ন্যাকস' },
-] : (() => {
-  // Derive categories dynamically from loaded products (like web-POS)
-  const seen = new Set<string>();
-  const cats: { key: string; label: string }[] = [];
-  for (const p of products) {
-    if (p?.category && !seen.has(p.category)) {
-      seen.add(p.category);
-      cats.push({ key: p.category, label: GROCERY_CATEGORY_LABELS[p.category] ?? p.category });
-    }
-  }
-  return cats;
-})();
-const handleQuickAdd = (product: any) => {
-  const item: CartItem = {
-    product_name: product.name_bangla,
+  // Anything sold today floats to the top of the list.
+  const salesCount = React.useMemo(() => {
+    const m: Record<string, number> = {};
+    for (const t of todayTransactions ?? []) if (t?.type === 'sale' && t.product_id) m[t.product_id] = (m[t.product_id] ?? 0) + 1;
+    return m;
+  }, [todayTransactions]);
+
+  const buildCartItem = (product: any): CartItem => ({
+    product_name: product.name_bangla || product.name_english,
     product_id: product.id,
     quantity: 1,
     unit: product.unit === 'gram' || product.unit === 'ml' ? 'piece' : product.unit,
@@ -294,10 +284,77 @@ const handleQuickAdd = (product: any) => {
     total: product.sale_price,
     checked: true,
     confidence: 1.0,
+  });
+
+  // The server refuses a bill line for a product with no stock, so say so at
+  // the moment of adding rather than letting the checkout fail later.
+  const warnIfOutOfStock = (product: any) => {
+    if (Number(product.current_stock ?? 0) <= 0) {
+      Toast.show({ type: 'info', text1: `${product.name_bangla || product.name_english} — স্টকে নেই`, text2: 'বিল করলে ব্যর্থ হতে পারে' });
+    }
   };
-  addToActiveCart([item]);
-  Toast.show({ type: 'success', text1: `✓ ${product.name_bangla} যোগ হয়েছে` });
-};
+
+  // From the search dropdown: it closes on select, so confirm with a toast.
+  const handleQuickAdd = (product: any) => {
+    addToActiveCart([buildCartItem(product)]);
+    Toast.show({ type: 'success', text1: `✓ ${product.name_bangla} যোগ হয়েছে` });
+    warnIfOutOfStock(product);
+  };
+
+  // Search found nothing (or the shopkeeper wants a new one): open the quick new-product form with the typed name.
+  const handleCreateFromSearch = (name: string) => {
+    setPendingProductName(name);
+    setPendingProductPrice('');
+    setPendingProductUnit('piece');
+    setNewProductModal(true);
+  };
+
+  // PRD FR-19: typing just an amount sells an open item that isn't in the catalog.
+  const handleAddCustom = (amount: number) => {
+    addToActiveCart([{
+      product_name: 'খোলা পণ্য', quantity: 1, unit: 'piece',
+      unit_price: amount, total: amount, checked: true, confidence: 1.0, custom: true,
+    }]);
+    Toast.show({ type: 'success', text1: `✓ খোলা পণ্য ৳${amount} যোগ হয়েছে` });
+  };
+
+  // Bills that were saved on this phone but never reached the server don't appear in
+  // reports. Surface that instead of retrying silently, and let the shopkeeper decide.
+  const handlePendingPress = () => {
+    const n = pendingBills.length;
+    const total = pendingBills.reduce((s, b) => s + b.items.reduce((t, i) => t + i.quantity * i.unit_price, 0), 0);
+    Alert.alert(
+      `${n}টি বিল সিঙ্ক হয়নি`,
+      `মোট ৳${Math.round(total)}। এগুলো সার্ভারে যায়নি, তাই রিপোর্টে আসবে না।\n\nইন্টারনেট থাকলে আবার চেষ্টা করুন। কোনো পণ্য সার্ভারে না থাকলে বিলটি কখনোই যাবে না।`,
+      [
+        { text: 'বন্ধ করুন', style: 'cancel' },
+        {
+          text: 'আবার চেষ্টা',
+          onPress: async () => {
+            await transactionService.syncPending();
+            const left = useTransactionStore.getState().pendingBills.length;
+            Toast.show(left === 0
+              ? { type: 'success', text1: 'সব বিল সিঙ্ক হয়েছে' }
+              : { type: 'error', text1: `${left}টি বিল এখনো যায়নি` });
+          },
+        },
+        {
+          text: 'বাদ দিন',
+          style: 'destructive',
+          onPress: () => Alert.alert('নিশ্চিত?', 'বিলটি চিরতরে মুছে যাবে, সার্ভারে যাবে না।', [
+            { text: 'না', style: 'cancel' },
+            { text: 'হ্যাঁ, মুছুন', style: 'destructive', onPress: () => useTransactionStore.getState().clearPendingBills() },
+          ]),
+        },
+      ],
+    );
+  };
+
+  // From the product list: the row itself flips to a − qty + stepper, no toast needed.
+  const handleListAdd = React.useCallback((product: any) => {
+    useCartStore.getState().addItem(buildCartItem(product));
+    warnIfOutOfStock(product);
+  }, []);
 
 
   return (
@@ -306,141 +363,72 @@ const handleQuickAdd = (product: any) => {
       <View style={styles.topBar}>
         <View>
           <Text style={styles.shopLabel}>{shop?.name}</Text>
-          <Text style={styles.userLabel}>{user?.name} • {format(new Date(), 'dd/MM/yyyy')}</Text>
+          <Text style={styles.userLabel}>
+            {user?.name} • {format(new Date(), 'dd/MM/yyyy')} • আজ ৳{formatCurrency(todaySales)}
+          </Text>
         </View>
-        <View style={styles.productBadge}>
-          <Ionicons name="cube-outline" size={12} color="rgba(255,255,255,0.9)" />
-          <Text style={styles.productBadgeText}>{products.length} পণ্য</Text>
+        <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
+          {/* Typed multi-item entry ("পিয়াজ ১ কেজি ৭০, ময়দা ২ কেজি ১৫০") — kept, just no longer a full-width bar */}
+          <TouchableOpacity style={styles.headerIconBtn} onPress={() => setTextModalVisible(true)} hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}>
+            <Ionicons name="create-outline" size={18} color="#fff" />
+          </TouchableOpacity>
+          <View style={styles.productBadge}>
+            <Ionicons name="cube-outline" size={12} color="rgba(255,255,255,0.9)" />
+            <Text style={styles.productBadgeText}>{products.length} পণ্য</Text>
+          </View>
         </View>
       </View>
+
+      {pendingBills.length > 0 && (
+        <TouchableOpacity style={styles.syncPill} onPress={handlePendingPress} activeOpacity={0.8}>
+          <Ionicons name="cloud-offline-outline" size={14} color="#7A4E0F" />
+          <Text style={styles.syncPillTxt}>{pendingBills.length}টি বিল সিঙ্ক হয়নি — ট্যাপ করুন</Text>
+        </TouchableOpacity>
+      )}
 
       {/* Customer tabs — every add-to-cart action targets whichever tab is active here */}
       <QueueTabs />
-
-      {/* Totals */}
-      <View style={styles.totalsRow}>
-        {[
-          { label: 'বিক্রয়', amount: todaySales, color: '#90EE90', icon: 'trending-up' },
-          { label: 'ক্রয়', amount: todayPurchases, color: '#ADD8E6', icon: 'trending-down' },
-          { label: 'লাভ', amount: todaySales - todayPurchases, color: todaySales - todayPurchases >= 0 ? '#90EE90' : '#FF6B6B', icon: 'wallet-outline' },
-        ].map((item, i) => (
-          <View key={i} style={styles.totalCard}>
-            <Ionicons name={item.icon as any} size={14} color={item.color} />
-            <Text style={[styles.totalAmount, { color: item.color }]}>৳{formatCurrency(item.amount)}</Text>
-            <Text style={styles.totalLabel}>{item.label}</Text>
-          </View>
-        ))}
-      </View>
 
       {/* ── INSTANT SEARCH — headline requirement, PRD §2 Goal 1 / §6.A ──
           Live, indexed, first-character Bangla+English product search.
           Selecting a result reuses the existing quick-add path unchanged. */}
       <InstantSearchBar
-        products={products}
+        products={activeProducts}
         onSelect={handleQuickAdd}
         onScanPress={() => router.push('/barcode-scanner')}
         recentProducts={recentProducts}
         frequentProducts={frequentProducts}
+        onCreateProduct={handleCreateFromSearch}
+        onAddCustom={handleAddCustom}
       />
 
       <View style={styles.mainArea}>
-
-        {/* The cart/bill used to live here as an always-expanded panel —
-            it's now CartBillBar, rendered below as a collapsed bar that
-            expands into a sheet on tap, which is what gives this area back
-            to search results / transaction history / category browsing. */}
-
-        {/* Transaction history */}
-        <ScrollView style={{ flex: 1, paddingHorizontal: 16 }} showsVerticalScrollIndicator={false}>
-          <Text style={styles.sectionTitle}>আজকের লেনদেন ({(todayTransactions || []).length})</Text>
-          {(todayTransactions|| []).length === 0 ? (
-            <View style={{ alignItems: 'center', paddingTop: 32, gap: 8 }}>
-              <Ionicons name="search-outline" size={52} color={COLORS.textMuted} />
-              <Text style={{ color: COLORS.textMuted, fontSize: FONT_SIZES.md, fontWeight: '600' }}>এখনো কোনো এন্ট্রি নেই</Text>
-              <Text style={{ color: COLORS.textMuted, fontSize: FONT_SIZES.sm, textAlign: 'center', lineHeight: 22, paddingHorizontal: 32 }}>
-                {shop?.shop_type === 'cosmetics' || shop?.shop_type === 'imported'
-                  ? `Search or scan a product above, or type multiple at once:\n"Vaseline 400ML 2pcs, Nivea Cream 1pc"`
-                  : `উপরে পণ্য খুঁজুন বা স্ক্যান করুন, অথবা একসাথে লিখুন:\n"পিয়াজ ১ কেজি ৭০, ময়দা ২ কেজি ১৫০"`}
-              </Text>
-            </View>
-          ) : (
-            <BillSummaryList transactions={todayTransactions} />
-          )}
-        </ScrollView>
-
-        {/* Bottom bar — search bar at the top already covers find/scan;
-            this is only the typed-multi-item power path
-            ("পিয়াজ ১ কেজি ৭০, ময়দা ২ কেজি ১৫০" in one go). */}
-        <View style={styles.voiceBar}>
-          <TouchableOpacity style={styles.typeMultiBtn} onPress={() => setTextModalVisible(true)} activeOpacity={0.8}>
-            <Ionicons name="pencil" size={18} color={COLORS.primary} />
-            <Text style={styles.typeMultiTxt}>
-              {shop?.shop_type === 'cosmetics' || shop?.shop_type === 'imported'
-                ? 'Type multiple products at once'
-                : 'একসাথে একাধিক পণ্য লিখুন'}
-            </Text>
-          </TouchableOpacity>
-        </View>
+        {/* Category filter, then every product as a row that acts directly on
+            the active customer's cart. The bill itself is the collapsed
+            CartBillBar below — that's what frees this whole area for
+            finding things instead of reading a draft. */}
+        <CategoryChipRail
+          categories={railCategories}
+          selected={selectedCategory}
+          onSelect={setSelectedCategory}
+          totalCount={activeProducts.length}
+        />
+        <ProductBrowseList
+          products={activeProducts}
+          category={selectedCategory}
+          salesCount={salesCount}
+          bottomInset={activeCart.items.length > 0 ? 110 : 24}
+          onAdd={handleListAdd}
+        />
       </View>
 
-      {/* Collapsed bill bar — floats above bottom nav, hidden when the active cart is empty */}
+      {/* Collapsed bill bar — floats above the bottom nav, hidden when the active cart is empty */}
       <CartBillBar
         onUnmatchedProduct={handleUnmatchedProduct}
         onCheckoutSuccess={handleCheckoutSuccess}
         onAddMore={() => setTextModalVisible(true)}
       />
-{/* ── QUICK ADD SECTION ── */}
-<View style={styles.quickSection}>
-  <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={{ paddingHorizontal: 12, gap: 8, paddingVertical: 8 }}>
-    {quickCategories.map(cat => (
-      <TouchableOpacity
-        key={cat.key}
-        style={[styles.quickCatBtn, quickCategory === cat.key && styles.quickCatBtnActive]}
-        onPress={() => setQuickCategory(quickCategory === cat.key ? null : cat.key)}
-      >
-        <Text style={[styles.quickCatTxt, quickCategory === cat.key && { color: '#fff' }]}>
-          {cat.label}
-        </Text>
-        <Ionicons
-          name={quickCategory === cat.key ? 'remove' : 'add'}
-          size={12}
-          color={quickCategory === cat.key ? '#fff' : COLORS.primary}
-        />
-      </TouchableOpacity>
-    ))}
-  </ScrollView>
 
-  {/* Show top 5 products for selected category */}
-  {quickCategory && (
-    <View style={styles.quickProductList}>
-      <Text style={styles.quickProductTitle}>
-        দ্রুত যোগ করুন:
-      </Text>
-      <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={{ paddingHorizontal: 12, gap: 8 }}>
-        {getTopProductsForCategory(quickCategory).map((product, i) => (
-          <TouchableOpacity
-            key={i}
-            style={styles.quickProductBtn}
-            onPress={() => handleQuickAdd(product)}
-          >
-            <Text style={styles.quickProductName} numberOfLines={2}>
-              {product.name_bangla}
-            </Text>
-            <Text style={styles.quickProductPrice}>৳{product.sale_price}</Text>
-            <View style={styles.quickAddIcon}>
-              <Ionicons name="add" size={14} color="#fff" />
-            </View>
-          </TouchableOpacity>
-        ))}
-        {getTopProductsForCategory(quickCategory).length === 0 && (
-          <Text style={{ fontSize: FONT_SIZES.sm, color: COLORS.textMuted, padding: 8 }}>
-            এই ক্যাটাগরিতে কোনো পণ্য নেই
-          </Text>
-        )}
-      </ScrollView>
-    </View>
-  )}
-</View>
       {/* ══ TEXT MODAL ══ */}
       <Modal visible={textModalVisible} animationType="slide" presentationStyle="pageSheet" onRequestClose={() => setTextModalVisible(false)}>
         <SafeAreaView style={{ flex: 1, backgroundColor: COLORS.surface }}>
@@ -653,64 +641,6 @@ const handleQuickAdd = (product: any) => {
   );
 }
 
-function BillSummaryList({ transactions }: { transactions: Transaction[] }) {
-  const [expanded, setExpanded] = React.useState<string | null>(null);
-  const groups: { key: string; items: Transaction[]; isInvoice: boolean }[] = [];
-  const seen = new Set<string>();
-
-  transactions.forEach(txn => {
-    const key = (txn as any).invoice_number ?? txn.id ?? String(Math.random());
-    if (!seen.has(key)) {
-      seen.add(key);
-      const relatedItems = (txn as any).invoice_number
-        ? transactions.filter(t => (t as any).invoice_number === (txn as any).invoice_number)
-        : [txn];
-      groups.push({ key, items: relatedItems, isInvoice: !!(txn as any).invoice_number });
-    }
-  });
-
-  return (
-    <View>
-      {groups.map(group => {
-        const total = group.items.reduce((s, t) => s + t.total_amount, 0);
-        const isSale = group.items[0].type === 'sale';
-        const isExpanded = expanded === group.key;
-        const firstTxn = group.items[0];
-        return (
-          <TouchableOpacity
-            key={group.key}
-            style={styles.billRow}
-            onPress={() => setExpanded(isExpanded ? null : group.key)}
-            activeOpacity={0.7}
-          >
-            <View style={[styles.txnDot, { backgroundColor: isSale ? COLORS.sale : COLORS.purchase }]} />
-            <View style={{ flex: 1 }}>
-              <Text style={styles.billNum}>
-                {group.key}
-                {'  '}{group.items.length} পণ্য
-              </Text>
-              {isExpanded && (
-                <View style={{ marginTop: 3 }}>
-                  {group.items.map((item, i) => (
-                    <Text key={i} style={styles.billDetail}>
-                      {item.product_name} {item.quantity}{item.unit} ৳{item.total_amount}
-                    </Text>
-                  ))}
-                </View>
-              )}
-            </View>
-             <View style={{ alignItems: 'flex-end', gap: 2 }}>
-              <Text style={[styles.billAmt, { color: isSale ? COLORS.sale : COLORS.purchase }]}>
-                {isSale ? '+' : '-'}৳{total}
-              </Text>
-              <Ionicons name={isExpanded ? 'chevron-up' : 'chevron-down'} size={11} color={COLORS.textMuted} />
-            </View>
-          </TouchableOpacity>
-        );
-      })}
-    </View>
-  );
-}
 function TxnRow({ txn }: { txn: Transaction }) {
   const isSale = txn.type === 'sale';
   return (
@@ -732,6 +662,13 @@ const styles = StyleSheet.create({
   topBar: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', paddingHorizontal: 20, paddingBottom: 12 },
   shopLabel: { fontSize: FONT_SIZES.md, fontWeight: '700', color: '#fff' },
   userLabel: { fontSize: FONT_SIZES.xs, color: 'rgba(255,255,255,0.7)', marginTop: 2 },
+  syncPill: {
+    alignSelf: 'flex-start', marginLeft: 16, marginBottom: 8,
+    flexDirection: 'row', alignItems: 'center', gap: 6,
+    backgroundColor: '#FCEFD8', paddingHorizontal: 12, paddingVertical: 6, borderRadius: 999,
+  },
+  syncPillTxt: { fontSize: FONT_SIZES.xs, fontWeight: '700', color: '#7A4E0F' },
+  headerIconBtn: { width: 34, height: 34, borderRadius: 17, backgroundColor: 'rgba(255,255,255,0.15)', alignItems: 'center', justifyContent: 'center' },
   productBadge: { flexDirection: 'row', alignItems: 'center', gap: 4, backgroundColor: 'rgba(255,255,255,0.15)', paddingHorizontal: 10, paddingVertical: 4, borderRadius: 20 },
   productBadgeText: { fontSize: FONT_SIZES.xs, color: 'rgba(255,255,255,0.9)' },
   totalsRow: { flexDirection: 'row', paddingHorizontal: 16, gap: 8, marginBottom: 12 },

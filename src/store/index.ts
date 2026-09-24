@@ -176,6 +176,8 @@ export interface CartItem {
   checked: boolean;
   confidence: number;
   notes?: string;
+  /** An intentional open item ("৳15 of loose biscuits") — no catalog product, so nothing to register. */
+  custom?: boolean;
 }
 
 export interface Cart {
@@ -190,6 +192,31 @@ export interface Cart {
 }
 
 export const MAX_CARTS = 6;
+
+/**
+ * What a customer would actually pay: checked lines, less the cart's discount.
+ * One definition, used by the customer tab and the bill bar, so they can never
+ * show different totals for the same cart.
+ */
+export function cartTotals(cart: Cart): { subtotal: number; discount: number; net: number } {
+  const subtotal = cart.items.filter(i => i.checked).reduce((s, i) => s + i.total, 0);
+  const v = parseFloat(cart.discountValue) || 0;
+  let discount = 0;
+  if (cart.discountType && v && !isNaN(v)) {
+    discount = cart.discountType === 'percentage' ? +(subtotal * Math.min(v, 100) / 100).toFixed(2) : Math.min(v, subtotal);
+  }
+  return { subtotal, discount, net: subtotal - discount };
+}
+
+/** Quantities are stored to 2 dp so repeated 0.25 steps never drift (0.1+0.2 style). */
+function roundQty(q: number): number {
+  return Math.round(q * 100) / 100;
+}
+
+/** How far one tap of the − / + stepper moves: weighed goods in quarter steps, counted goods by 1. */
+export function qtyStep(unit: Unit): number {
+  return unit === 'kg' || unit === 'litre' ? 0.25 : 1;
+}
 
 function newCart(label: string, id?: string): Cart {
   return {
@@ -236,6 +263,10 @@ interface CartStore {
   mergeTabs: (fromId: string, intoId: string) => void;
 
   addItem: (item: CartItem, cartId?: string) => void;
+  /** Step a product's quantity in a cart; reaching 0 removes the line. */
+  changeQuantity: (cartId: string, productId: string, delta: number) => void;
+  /** Set an exact quantity (weighed goods); 0 removes the line. */
+  setQuantity: (cartId: string, productId: string, quantity: number) => void;
   updateItem: (cartId: string, index: number, patch: Partial<CartItem>) => void;
   toggleItem: (cartId: string, index: number) => void;
   removeItem: (cartId: string, index: number) => void;
@@ -255,7 +286,7 @@ export const useCartStore = create<CartStore>()(
   persist(
     (set, get) => ({
       carts: [newCart('কাস্টমার ১', 'cart-bootstrap')],
-      activeCartId: '', // resolved lazily below since newCart() ids are random per call
+      activeCartId: 'cart-bootstrap', // the bootstrap cart's fixed id; rehydrate re-points it if a saved id is stale
 
       activeCart: () => {
         const { carts, activeCartId } = get();
@@ -295,8 +326,45 @@ export const useCartStore = create<CartStore>()(
 
       addItem: (item, cartId) => {
         const id = cartId ?? get().activeCartId;
-        set(s => ({ carts: s.carts.map(c => c.id === id ? { ...c, items: [...c.items, item] } : c) }));
+        set(s => ({
+          carts: s.carts.map(c => {
+            if (c.id !== id) return c;
+            // Same product at the same price and unit is the same bill line —
+            // raise its quantity instead of stacking a duplicate row, so the
+            // product list's − / + stepper always acts on exactly one line.
+            const at = item.product_id
+              ? c.items.findIndex(i => i.product_id === item.product_id && i.unit === item.unit && i.unit_price === item.unit_price)
+              : -1;
+            if (at === -1) return { ...c, items: [...c.items, item] };
+            const items = c.items.map((i, idx) => {
+              if (idx !== at) return i;
+              const quantity = roundQty(i.quantity + item.quantity);
+              return { ...i, quantity, total: +(quantity * i.unit_price).toFixed(2), checked: true };
+            });
+            return { ...c, items };
+          }),
+        }));
       },
+      changeQuantity: (cartId, productId, delta) => set(s => ({
+        carts: s.carts.map(c => {
+          if (c.id !== cartId) return c;
+          const at = c.items.findIndex(i => i.product_id === productId);
+          if (at === -1) return c;
+          const quantity = roundQty(c.items[at].quantity + delta);
+          if (quantity <= 0) return { ...c, items: c.items.filter((_, idx) => idx !== at) };
+          return { ...c, items: c.items.map((i, idx) => idx !== at ? i : { ...i, quantity, total: +(quantity * i.unit_price).toFixed(2) }) };
+        }),
+      })),
+      setQuantity: (cartId, productId, quantity) => set(s => ({
+        carts: s.carts.map(c => {
+          if (c.id !== cartId) return c;
+          const at = c.items.findIndex(i => i.product_id === productId);
+          if (at === -1) return c;
+          const q = roundQty(quantity);
+          if (q <= 0) return { ...c, items: c.items.filter((_, idx) => idx !== at) };
+          return { ...c, items: c.items.map((i, idx) => idx !== at ? i : { ...i, quantity: q, total: +(q * i.unit_price).toFixed(2) }) };
+        }),
+      })),
       updateItem: (cartId, index, patch) => set(s => ({
         carts: s.carts.map(c => c.id !== cartId ? c : {
           ...c, items: c.items.map((it, i) => i === index ? { ...it, ...patch } : it),

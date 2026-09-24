@@ -18,6 +18,10 @@ interface Props {
    */
   recentProducts?: Product[];
   frequentProducts?: Product[];
+  /** "Nothing found" escape hatch: register the typed text as a new product. */
+  onCreateProduct?: (name: string) => void;
+  /** Type just an amount ("15") to sell an open/loose item that isn't in the catalog (PRD FR-19). */
+  onAddCustom?: (amount: number) => void;
 }
 
 function ProductRow({ item, onPress }: { item: Product; onPress: () => void }) {
@@ -50,6 +54,7 @@ function ProductRow({ item, onPress }: { item: Product; onPress: () => void }) {
  */
 export default function InstantSearchBar({
   products, onSelect, onScanPress, placeholder, recentProducts = [], frequentProducts = [],
+  onCreateProduct, onAddCustom,
 }: Props) {
   const [query, setQuery] = useState('');
   const [focused, setFocused] = useState(false);
@@ -71,6 +76,44 @@ export default function InstantSearchBar({
     setQuery('');
     inputRef.current?.blur();
   };
+
+  // A short all-digit query is an amount, not a name. Long digit strings are barcodes, so they're excluded.
+  const amountMatch = /^\d{1,5}(\.\d+)?$/.test(query.trim()) ? parseFloat(query.trim()) : null;
+  const amount = amountMatch !== null && amountMatch > 0 ? amountMatch : null;
+
+  const actionRows = (
+    <View>
+      {amount !== null && onAddCustom && (
+        <TouchableOpacity
+          style={styles.actionRow}
+          activeOpacity={0.7}
+          onPress={() => { onAddCustom(amount); setQuery(''); inputRef.current?.blur(); }}
+        >
+          <View style={[styles.actionIcon, { backgroundColor: '#FCEFD8' }]}>
+            <Ionicons name="pricetag-outline" size={18} color="#7A4E0F" />
+          </View>
+          <View style={{ flex: 1, minWidth: 0 }}>
+            <Text style={styles.resultName}>৳{amount} — খোলা পণ্য হিসেবে যোগ করুন</Text>
+            <Text style={styles.resultMeta}>ক্যাটালগে নেই, কোনো স্টক কমবে না</Text>
+          </View>
+        </TouchableOpacity>
+      )}
+      {amount === null && onCreateProduct && query.trim().length > 0 && (
+        <TouchableOpacity
+          style={styles.actionRow}
+          activeOpacity={0.7}
+          onPress={() => { onCreateProduct(query.trim()); setQuery(''); inputRef.current?.blur(); }}
+        >
+          <View style={[styles.actionIcon, { backgroundColor: COLORS.surfaceSecondary }]}>
+            <Ionicons name="add-circle-outline" size={20} color={COLORS.primary} />
+          </View>
+          <View style={{ flex: 1, minWidth: 0 }}>
+            <Text style={styles.resultName} numberOfLines={1}>"{query.trim()}" নতুন পণ্য হিসেবে যোগ করুন</Text>
+          </View>
+        </TouchableOpacity>
+      )}
+    </View>
+  );
 
   return (
     <View style={styles.wrap}>
@@ -100,9 +143,12 @@ export default function InstantSearchBar({
       {showResults && (
         <View style={styles.resultsPanel}>
           {results.length === 0 ? (
-            <View style={styles.noMatch}>
-              <Text style={styles.noMatchText}>"{query}" — এই পণ্য পাওয়া যায়নি</Text>
-              <Text style={styles.noMatchHint}>বানান বা বারকোড আলাদা হতে পারে</Text>
+            <View>
+              <View style={styles.noMatch}>
+                <Text style={styles.noMatchText}>"{query}" — এই পণ্য পাওয়া যায়নি</Text>
+                <Text style={styles.noMatchHint}>বানান বা বারকোড আলাদা হতে পারে</Text>
+              </View>
+              {actionRows}
             </View>
           ) : (
             <FlatList
@@ -111,6 +157,7 @@ export default function InstantSearchBar({
               keyboardShouldPersistTaps="handled"
               style={{ maxHeight: 320 }}
               renderItem={({ item }) => <ProductRow item={item} onPress={() => handleSelect(item)} />}
+              ListFooterComponent={actionRows}
             />
           )}
         </View>
@@ -176,6 +223,12 @@ const styles = StyleSheet.create({
     width: 28, height: 28, borderRadius: 14, backgroundColor: COLORS.primary,
     alignItems: 'center', justifyContent: 'center',
   },
+  actionRow: {
+    flexDirection: 'row', alignItems: 'center', gap: 10,
+    paddingHorizontal: 12, paddingVertical: 12,
+    borderTopWidth: 0.5, borderTopColor: COLORS.border, backgroundColor: '#FAFBFA',
+  },
+  actionIcon: { width: 36, height: 36, borderRadius: 8, alignItems: 'center', justifyContent: 'center' },
   noMatch: { padding: 16, alignItems: 'center', gap: 2 },
   noMatchText: { fontSize: FONT_SIZES.sm, color: COLORS.text, fontWeight: '600' },
   noMatchHint: { fontSize: FONT_SIZES.xs, color: COLORS.textMuted },

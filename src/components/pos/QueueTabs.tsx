@@ -1,7 +1,7 @@
 import React, { useState } from 'react';
 import { View, Text, TouchableOpacity, ScrollView, Modal, TextInput, StyleSheet, Alert } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
-import { useCartStore, MAX_CARTS, Cart } from '@/store';
+import { useCartStore, MAX_CARTS, Cart, cartTotals } from '@/store';
 import { FONT_SIZES } from '@/constants';
 
 /**
@@ -15,7 +15,7 @@ export default function QueueTabs() {
   const [renaming, setRenaming] = useState<Cart | null>(null);
   const [renameText, setRenameText] = useState('');
 
-  const cartTotal = (c: Cart) => c.items.reduce((s, i) => s + i.total, 0);
+  const cartTotal = (c: Cart) => cartTotals(c).net;
 
   const handleLongPress = (cart: Cart) => {
     const options: any[] = [

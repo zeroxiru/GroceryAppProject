@@ -11,6 +11,8 @@ interface AuthStore {
   isAuthenticated: boolean;
   accessToken: string | null;
   refreshToken: string | null;
+  // Survives logout (which nulls `shop`) so a login into a DIFFERENT shop can be detected.
+  lastShopId: string | null;
   setShop: (shop: Shop) => void;
   setUser: (user: User) => void;
   setTokens: (access: string, refresh: string) => void;
@@ -19,13 +21,20 @@ interface AuthStore {
 
 export const useAuthStore = create<AuthStore>()(
   persist(
-    (set) => ({
+    (set, get) => ({
       shop: null,
       user: null,
       isAuthenticated: false,
       accessToken: null,
       refreshToken: null,
-      setShop: (shop) => set({ shop }),
+      lastShopId: null,
+      setShop: (shop) => {
+        // First login after this field was introduced has lastShopId=null but may still hold
+        // another shop's cart/products — treat unknown as "changed" once.
+        const prev = get().lastShopId ?? get().shop?.id ?? null;
+        if (prev !== shop.id) onShopChanged(prev, shop.id);
+        set({ shop, lastShopId: shop.id });
+      },
       setUser: (user) => set({ user, isAuthenticated: true }),
       setTokens: (accessToken, refreshToken) => set({ accessToken, refreshToken }),
       logout: () => set({ user: null, isAuthenticated: false, shop: null, accessToken: null, refreshToken: null }),
@@ -178,6 +187,8 @@ export interface CartItem {
   notes?: string;
   /** An intentional open item ("৳15 of loose biscuits") — no catalog product, so nothing to register. */
   custom?: boolean;
+  /** Loose items: the product's price PER GRAM. unit_price is derived from it so the line total is a whole taka. */
+  list_unit_price?: number;
 }
 
 export interface Cart {
@@ -208,6 +219,18 @@ export function cartTotals(cart: Cart): { subtotal: number; discount: number; ne
   return { subtotal, discount, net: subtotal - discount };
 }
 
+/**
+ * New quantity for a bill line. Loose (gram) lines are priced to a WHOLE taka — 500 g at ৳0.065/g is ৳33, not ৳32.5 —
+ * and unit_price is set to total/qty so the server's own qty × unit_price lands on exactly that whole-taka total.
+ */
+function repriceLine(i: CartItem, q: number): { quantity: number; total: number; unit_price: number } {
+  if (i.unit === 'gram' && i.list_unit_price) {
+    const total = Math.max(1, Math.round(q * i.list_unit_price));
+    return { quantity: q, total, unit_price: total / q };
+  }
+  return { quantity: q, total: +(q * i.unit_price).toFixed(2), unit_price: i.unit_price };
+}
+
 /** Quantities are stored to 2 dp so repeated 0.25 steps never drift (0.1+0.2 style). */
 function roundQty(q: number): number {
   return Math.round(q * 100) / 100;
@@ -215,6 +238,7 @@ function roundQty(q: number): number {
 
 /** How far one tap of the − / + stepper moves: weighed goods in quarter steps, counted goods by 1. */
 export function qtyStep(unit: Unit): number {
+  if (unit === 'gram') return 100; // loose items are counted in grams; one tap = 100 g, exact amounts go through the weight sheet
   return unit === 'kg' || unit === 'litre' ? 0.25 : 1;
 }
 
@@ -338,8 +362,7 @@ export const useCartStore = create<CartStore>()(
             if (at === -1) return { ...c, items: [...c.items, item] };
             const items = c.items.map((i, idx) => {
               if (idx !== at) return i;
-              const quantity = roundQty(i.quantity + item.quantity);
-              return { ...i, quantity, total: +(quantity * i.unit_price).toFixed(2), checked: true };
+              return { ...i, ...repriceLine(i, roundQty(i.quantity + item.quantity)), checked: true };
             });
             return { ...c, items };
           }),
@@ -352,7 +375,7 @@ export const useCartStore = create<CartStore>()(
           if (at === -1) return c;
           const quantity = roundQty(c.items[at].quantity + delta);
           if (quantity <= 0) return { ...c, items: c.items.filter((_, idx) => idx !== at) };
-          return { ...c, items: c.items.map((i, idx) => idx !== at ? i : { ...i, quantity, total: +(quantity * i.unit_price).toFixed(2) }) };
+          return { ...c, items: c.items.map((i, idx) => idx !== at ? i : { ...i, ...repriceLine(i, quantity) }) };
         }),
       })),
       setQuantity: (cartId, productId, quantity) => set(s => ({
@@ -362,7 +385,7 @@ export const useCartStore = create<CartStore>()(
           if (at === -1) return c;
           const q = roundQty(quantity);
           if (q <= 0) return { ...c, items: c.items.filter((_, idx) => idx !== at) };
-          return { ...c, items: c.items.map((i, idx) => idx !== at ? i : { ...i, quantity: q, total: +(q * i.unit_price).toFixed(2) }) };
+          return { ...c, items: c.items.map((i, idx) => idx !== at ? i : { ...i, ...repriceLine(i, q) }) };
         }),
       })),
       updateItem: (cartId, index, patch) => set(s => ({
@@ -402,3 +425,32 @@ export const useCartStore = create<CartStore>()(
     },
   ),
 );
+
+// ─── Shop switch hygiene ──────────────────────────────────────────────────────
+// Carts, cached products, the category catalog and unsynced bills all belong to ONE shop.
+// Logging into a different shop with the old data still in place shows the wrong products,
+// and bills queued for the old shop are refused by the server ("product not found") forever.
+// Unsynced bills are parked (not deleted) under the shop they belong to and restored if
+// that shop logs in again on this device.
+const PARKED_BILLS_KEY = (shopId: string | null) => `dokan-parked-bills-${shopId ?? 'legacy'}`;
+
+function onShopChanged(prevShopId: string | null, nextShopId: string): void {
+  console.warn(`[Shop] switching ${prevShopId ?? 'unknown'} -> ${nextShopId}: clearing shop-scoped local data`);
+  const pending = useTransactionStore.getState().pendingBills ?? [];
+  if (pending.length > 0) {
+    AsyncStorage.setItem(PARKED_BILLS_KEY(prevShopId), JSON.stringify(pending)).catch(() => {});
+    console.warn(`[Shop] parked ${pending.length} unsynced bill(s) for ${prevShopId ?? 'legacy'}`);
+  }
+  useTransactionStore.setState({ pendingBills: [], todayTransactions: [] });
+  useProductStore.setState({ products: [], lastFetched: null });
+  useCatalogStore.getState().clear();
+  useCartStore.setState({ carts: [newCart('কাস্টমার ১', 'cart-bootstrap')], activeCartId: 'cart-bootstrap' });
+
+  AsyncStorage.getItem(PARKED_BILLS_KEY(nextShopId)).then((json) => {
+    if (!json) return;
+    const back = JSON.parse(json);
+    useTransactionStore.setState((st) => ({ pendingBills: [...back, ...(st.pendingBills ?? [])] }));
+    AsyncStorage.removeItem(PARKED_BILLS_KEY(nextShopId)).catch(() => {});
+    console.warn(`[Shop] restored ${back.length} parked bill(s) for ${nextShopId}`);
+  }).catch(() => {});
+}

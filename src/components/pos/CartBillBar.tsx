@@ -1,3 +1,4 @@
+import { formatCartQty } from '@/utils/looseUnits';
 import React, { useState } from 'react';
 import { View, Text, TouchableOpacity, ScrollView, Modal, TextInput, ActivityIndicator, Alert, StyleSheet } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
@@ -178,7 +179,7 @@ export default function CartBillBar({ onUnmatchedProduct, onCheckoutSuccess, onA
                   {item.checked && <Ionicons name="checkmark" size={13} color="#fff" />}
                 </View>
                 <Text style={styles.itemName} numberOfLines={1}>{item.product_name}</Text>
-                <Text style={styles.itemQty}>{item.quantity}{item.unit}×৳{item.unit_price}</Text>
+                <Text style={styles.itemQty}>{formatCartQty(item)}</Text>
                 <Text style={styles.itemAmt}>৳{item.total}</Text>
                 <TouchableOpacity onPress={() => openEdit(i)} hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }} style={{ paddingHorizontal: 4 }}>
                   <Ionicons name="pencil" size={16} color={COLORS.primary} />

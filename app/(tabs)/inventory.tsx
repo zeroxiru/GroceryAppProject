@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useRef } from 'react';
+import { isLoose, formatWeight, formatPricePerKg } from '@/utils/looseUnits';
 import {
   View, Text, StyleSheet, FlatList, TouchableOpacity,
   TextInput, Alert, Modal, ActivityIndicator, ScrollView,
@@ -218,14 +219,20 @@ export default function InventoryScreen() {
                       {p.size && <Text style={{ fontSize: 10, color: COLORS.textMuted }}>{p.size}</Text>}
                       {p.barcode && <Text style={{ fontSize: 10, color: COLORS.textMuted }}>🔢 {p.barcode}</Text>}
                       <View style={{ flexDirection: 'row', gap: 10, marginTop: 2 }}>
-                        <Text style={{ fontSize: FONT_SIZES.xs, color: COLORS.sale, fontWeight: '700' }}>৳{item.sale_price}</Text>
+                        <Text style={{ fontSize: FONT_SIZES.xs, color: COLORS.sale, fontWeight: '700' }}>{isLoose(item) ? formatPricePerKg(Number(item.sale_price)) : `৳${item.sale_price}`}</Text>
                         {p.mrp && p.mrp !== item.sale_price && <Text style={{ fontSize: FONT_SIZES.xs, color: COLORS.textMuted, textDecorationLine: 'line-through' }}>MRP ৳{p.mrp}</Text>}
                       </View>
                       {p.expiry_date && <Text style={{ fontSize: 10, color: new Date(p.expiry_date) < new Date() ? COLORS.error : '#F59E0B' }}>⏰ Exp: {p.expiry_date}</Text>}
                     </View>
                     <View style={{ alignItems: 'flex-end', gap: 4 }}>
-                      <Text style={[styles.stockNum, isLow && { color: COLORS.error }]}>{item.current_stock}</Text>
-                      <Text style={{ fontSize: FONT_SIZES.xs, color: COLORS.textMuted }}>{item.unit}</Text>
+                      {isLoose(item) ? (
+                        <Text style={[styles.stockNum, { fontSize: FONT_SIZES.sm }, isLow && { color: COLORS.error }]}>{formatWeight(Number(item.current_stock))}</Text>
+                      ) : (
+                        <>
+                          <Text style={[styles.stockNum, isLow && { color: COLORS.error }]}>{item.current_stock}</Text>
+                          <Text style={{ fontSize: FONT_SIZES.xs, color: COLORS.textMuted }}>{item.unit}</Text>
+                        </>
+                      )}
                       {isLow && <Ionicons name="warning" size={14} color={COLORS.error} />}
                       <TouchableOpacity style={styles.stockInBtn} onPress={() => { setStockInProduct(item); setStockInModalVisible(true); }}>
                         <Ionicons name="arrow-up" size={10} color="#fff" />

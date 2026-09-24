@@ -14,6 +14,8 @@ interface Props {
   /** Space to leave under the last row so the floating bill bar never hides it. */
   bottomInset: number;
   onAdd: (product: Product) => void;
+  /** Loose items: open the weight / amount sheet. */
+  onLoose: (product: Product) => void;
 }
 
 /**
@@ -22,7 +24,7 @@ interface Props {
  * old "today's transactions" panel — the counter screen is for finding and
  * adding items, not reading history.
  */
-export default function ProductBrowseList({ products, category, salesCount, bottomInset, onAdd }: Props) {
+export default function ProductBrowseList({ products, category, salesCount, bottomInset, onAdd, onLoose }: Props) {
   const cart = useCartStore(s => s.activeCart());
   const [exactFor, setExactFor] = useState<Product | null>(null);
   const [exactText, setExactText] = useState('');
@@ -83,6 +85,7 @@ export default function ProductBrowseList({ products, category, salesCount, bott
             onAdd={onAdd}
             onStep={handleStep}
             onExact={handleExact}
+            onLoose={onLoose}
           />
         )}
         ItemSeparatorComponent={() => <View style={{ height: 8 }} />}

@@ -4,6 +4,7 @@ import { Ionicons } from '@expo/vector-icons';
 import { Product } from '@/types';
 import { POS, tagColorFor } from '@/constants/posTokens';
 import { FONT_SIZES, UNITS } from '@/constants';
+import { isLoose, formatWeight, formatPricePerKg } from '@/utils/looseUnits';
 
 interface Props {
   product: Product;
@@ -13,6 +14,8 @@ interface Props {
   onStep: (product: Product, direction: 1 | -1) => void;
   /** Long-press the quantity to type an exact amount (e.g. 2.5 kg) instead of tapping through quarter steps. */
   onExact: (product: Product) => void;
+  /** Loose items open the weight / amount sheet instead of adding "1". */
+  onLoose: (product: Product) => void;
 }
 
 export function formatQty(q: number): string {
@@ -24,13 +27,15 @@ export function formatQty(q: number): string {
  * states, one layout, so the shopkeeper never re-learns the row mid-sale:
  * normal, low/out of stock, and "no barcode yet".
  */
-function ProductListItemImpl({ product, qty, onAdd, onStep, onExact }: Props) {
+function ProductListItemImpl({ product, qty, onAdd, onStep, onExact, onLoose }: Props) {
   const stock = Number(product.current_stock ?? 0);
   const min = Number(product.min_stock_alert ?? 0);
   const out = stock <= 0;
   const low = !out && (min > 0 ? stock <= min : stock <= 5);
   const noBarcode = !product.barcode;
+  const loose = isLoose(product);
   const unitLabel = UNITS[product.unit]?.bangla ?? product.unit;
+  const stockTxt = (n: number) => (loose ? formatWeight(n) : formatQty(n));
   const initial = (product.name_bangla || product.name_english || '?').trim().charAt(0);
 
   return (
@@ -42,22 +47,29 @@ function ProductListItemImpl({ product, qty, onAdd, onStep, onExact }: Props) {
       <View style={{ flex: 1, minWidth: 0 }}>
         <Text style={styles.name} numberOfLines={1}>{product.name_bangla || product.name_english}</Text>
         <View style={styles.priceLine}>
-          <Text style={styles.price}>৳{product.sale_price}</Text>
-          <Text style={styles.unit}>/{unitLabel}</Text>
+          {loose ? (
+            <Text style={styles.price}>{formatPricePerKg(Number(product.sale_price))}</Text>
+          ) : (
+            <>
+              <Text style={styles.price}>৳{product.sale_price}</Text>
+              <Text style={styles.unit}>/{unitLabel}</Text>
+            </>
+          )}
           {out ? (
             <View style={[styles.pill, { backgroundColor: POS.danger100 }]}>
               <Text style={[styles.pillTxt, { color: POS.danger600 }]}>স্টক নেই</Text>
             </View>
           ) : low ? (
             <View style={[styles.pill, { backgroundColor: POS.warning100 }]}>
-              <Text style={[styles.pillTxt, { color: POS.warning600 }]}>মজুদ কম · {formatQty(stock)}</Text>
+              <Text style={[styles.pillTxt, { color: POS.warning600 }]}>মজুদ কম · {stockTxt(stock)}</Text>
             </View>
-          ) : noBarcode ? (
+          ) : loose ? null : noBarcode ? (
             <Text style={styles.noBarcode}>বারকোড নেই</Text>
           ) : (
             <Text style={styles.code} numberOfLines={1}>{product.barcode}</Text>
           )}
         </View>
+        {loose && !out && !low && <Text style={styles.stockLine} numberOfLines={1}>স্টক {formatWeight(stock)}</Text>}
       </View>
 
       {qty > 0 ? (
@@ -65,13 +77,18 @@ function ProductListItemImpl({ product, qty, onAdd, onStep, onExact }: Props) {
           <TouchableOpacity style={styles.stepBtn} onPress={() => onStep(product, -1)} hitSlop={{ top: 8, bottom: 8, left: 6, right: 2 }}>
             <Ionicons name="remove" size={18} color={POS.ink900} />
           </TouchableOpacity>
-          <TouchableOpacity onLongPress={() => onExact(product)} onPress={() => onExact(product)} activeOpacity={0.6}>
-            <Text style={styles.qty}>{formatQty(qty)}</Text>
+          <TouchableOpacity onLongPress={() => (loose ? onLoose(product) : onExact(product))} onPress={() => (loose ? onLoose(product) : onExact(product))} activeOpacity={0.6}>
+            <Text style={[styles.qty, loose && styles.qtyLoose]}>{loose ? formatWeight(qty) : formatQty(qty)}</Text>
           </TouchableOpacity>
           <TouchableOpacity style={[styles.stepBtn, styles.stepBtnPlus]} onPress={() => onStep(product, 1)} hitSlop={{ top: 8, bottom: 8, left: 2, right: 6 }}>
             <Ionicons name="add" size={18} color="#fff" />
           </TouchableOpacity>
         </View>
+      ) : loose ? (
+        <TouchableOpacity style={styles.looseBtn} onPress={() => onLoose(product)} hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }} activeOpacity={0.8}>
+          <Ionicons name="scale-outline" size={16} color="#fff" />
+          <Text style={styles.looseBtnTxt}>পরিমাণ দিন</Text>
+        </TouchableOpacity>
       ) : (
         <TouchableOpacity style={styles.addBtn} onPress={() => onAdd(product)} hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }} activeOpacity={0.8}>
           <Ionicons name="add" size={22} color="#fff" />
@@ -83,7 +100,7 @@ function ProductListItemImpl({ product, qty, onAdd, onStep, onExact }: Props) {
 
 // Long lists re-render on every cart change; only rows whose product or quantity changed need to.
 export default React.memo(ProductListItemImpl, (a, b) =>
-  a.product === b.product && a.qty === b.qty && a.onAdd === b.onAdd && a.onStep === b.onStep && a.onExact === b.onExact);
+  a.product === b.product && a.qty === b.qty && a.onAdd === b.onAdd && a.onStep === b.onStep && a.onExact === b.onExact && a.onLoose === b.onLoose);
 
 const styles = StyleSheet.create({
   row: {
@@ -99,6 +116,7 @@ const styles = StyleSheet.create({
   price: { fontSize: FONT_SIZES.md, fontWeight: '700', color: POS.ink900, fontVariant: ['tabular-nums'] },
   unit: { fontSize: FONT_SIZES.xs, color: POS.ink600 },
   code: { flexShrink: 1, fontSize: 11, color: POS.ink400, fontVariant: ['tabular-nums'] },
+  stockLine: { fontSize: 11, color: POS.ink600, marginTop: 1 },
   noBarcode: { fontSize: 11, fontWeight: '600', color: POS.warning600 },
   pill: { paddingHorizontal: 8, paddingVertical: 1, borderRadius: 999 },
   pillTxt: { fontSize: 11, fontWeight: '700' },
@@ -106,5 +124,8 @@ const styles = StyleSheet.create({
   stepper: { flexDirection: 'row', alignItems: 'center', gap: 6, backgroundColor: POS.surface200, borderRadius: 999, padding: 3 },
   stepBtn: { width: 30, height: 30, borderRadius: 15, backgroundColor: '#fff', alignItems: 'center', justifyContent: 'center' },
   stepBtnPlus: { backgroundColor: POS.brand600 },
+  qtyLoose: { minWidth: 62, fontSize: FONT_SIZES.sm },
+  looseBtn: { flexDirection: 'row', alignItems: 'center', gap: 5, paddingHorizontal: 12, height: 38, borderRadius: 19, backgroundColor: POS.brand600 },
+  looseBtnTxt: { color: '#fff', fontSize: FONT_SIZES.sm, fontWeight: '700' },
   qty: { minWidth: 30, textAlign: 'center', fontSize: FONT_SIZES.md, fontWeight: '800', color: POS.ink900, fontVariant: ['tabular-nums'] },
 });

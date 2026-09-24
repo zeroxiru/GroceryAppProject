@@ -1,5 +1,6 @@
 import 'react-native-get-random-values'
 import { useEffect } from 'react';
+import { LogBox } from 'react-native';
 import { router, Stack } from 'expo-router';
 import { StatusBar } from 'expo-status-bar';
 import { GestureHandlerRootView } from 'react-native-gesture-handler';
@@ -9,6 +10,10 @@ import { useAuthStore } from '@/store';
 import { transactionService } from '@/services/supabase/transactionService';
 import { onSessionExpired } from '@/services/api/client';
 import { COLORS } from '@/constants';
+
+// Development builds show a "Open debugger to view warnings" toast over the POS; it never appears in a release build.
+// Warnings still print to the Metro terminal / logcat — only the on-screen toast is silenced.
+if (__DEV__) LogBox.ignoreAllLogs(true);
 
 export default function RootLayout() {
   const { isAuthenticated } = useAuthStore();

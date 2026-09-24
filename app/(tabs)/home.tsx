@@ -26,6 +26,21 @@ import { useCartStore, CartItem } from '@/store';
 import { useCatalog } from '@/hooks/useCatalog';
 import CategoryChipRail, { RailCategory } from '@/components/pos/CategoryChipRail';
 import ProductBrowseList from '@/components/pos/ProductBrowseList';
+import BarcodeScanFAB from '@/components/pos/BarcodeScanFAB';
+import BarcodeScanSheet from '@/components/pos/BarcodeScanSheet';
+import LooseQuantitySheet from '@/components/pos/LooseQuantitySheet';
+import { isLoose, formatWeight } from '@/utils/looseUnits';
+import type { Product } from '@/types';
+
+// The 12 approved shop categories: fixed shelf order (staples first) and Bangla names for the chip rail.
+const POS_CATEGORIES: [string, string][] = [
+  ['Rice & Grains', 'চাল ও শস্য'], ['Dal & Pulses', 'ডাল'], ['Oil & Ghee', 'তেল ও ঘি'], ['Spices', 'মসলা'],
+  ['Onion, Garlic & Veg', 'পেঁয়াজ, রসুন ও সবজি'], ['Sugar, Salt & Tea', 'চিনি, লবণ ও চা'], ['Dairy & Eggs', 'দুধ ও ডিম'],
+  ['Snacks & Biscuits', 'বিস্কুট ও স্ন্যাকস'], ['Drinks', 'পানীয়'], ['Personal Care', 'প্রসাধনী'],
+  ['Cleaning & Household', 'পরিষ্কার ও গৃহস্থালি'], ['Baby & Misc', 'শিশু ও অন্যান্য'],
+];
+const POS_CATEGORY_BN: Record<string, string> = Object.fromEntries(POS_CATEGORIES);
+const POS_CATEGORY_ORDER: Record<string, number> = Object.fromEntries(POS_CATEGORIES.map(([k], i) => [k, i]));
 
 const GROCERY_CATEGORY_LABELS: Record<string, string> = {
   drink:     '🥤 পানীয়',
@@ -81,6 +96,7 @@ export default function HomeScreen() {
   const nluRef = useRef(createNLUService(products));
   const multiParserRef = useRef(new MultiItemParser(nluRef.current));
   const [selectedCategory, setSelectedCategory] = useState<string | null>(null);
+  const [scanVisible, setScanVisible] = useState(false);
   const params = useLocalSearchParams();
 
   useEffect(() => {
@@ -224,7 +240,7 @@ useEffect(() => {
     pmInfo ? `${pmInfo.icon} পেমেন্ট: ${pmInfo.label}` : '',
     `──────────────`,
     ...lastInvoice.items.map((item, i) =>
-      `${i + 1}. ${item.product_name} — ${item.quantity}${item.unit} × ৳${item.unit_price} = ৳${item.total}`
+      `${i + 1}. ${item.product_name} — ${item.unit === 'gram' ? formatWeight(item.quantity) : `${item.quantity}${item.unit} × ৳${item.unit_price}`} = ৳${item.total}`
     ),
     `──────────────`,
     `উপমোট: ৳${Math.round(lastInvoice.total)}`,
@@ -258,11 +274,13 @@ useEffect(() => {
     const counts: Record<string, number> = {};
     for (const p of activeProducts) if (p.category) counts[p.category] = (counts[p.category] ?? 0) + 1;
     return Object.entries(counts)
-      .sort((a, b) => b[1] - a[1])
+      // approved categories keep their fixed shelf order; anything else follows, biggest first
+      .sort((a, b) => (POS_CATEGORY_ORDER[a[0]] ?? 99) - (POS_CATEGORY_ORDER[b[0]] ?? 99) || b[1] - a[1])
       .map(([key, count]) => ({
         key,
         count,
-        label: catalogCategories.find(c => c.name === key)?.display_name_bangla
+        label: POS_CATEGORY_BN[key]
+          ?? catalogCategories.find(c => c.name === key)?.display_name_bangla
           ?? GROCERY_CATEGORY_LABELS[key]
           ?? key.replace(/_/g, ' '),
       }));
@@ -294,8 +312,29 @@ useEffect(() => {
     }
   };
 
+  // Loose items are sold by weight or by taka: picking one opens the quantity sheet instead of adding "1".
+  const [looseFor, setLooseFor] = useState<Product | null>(null);
+  const looseLine = looseFor ? activeCart.items.find(i => i.product_id === looseFor.id && i.unit === 'gram') : undefined;
+
+  const confirmLoose = (grams: number, unitPrice: number, total: number) => {
+    const p = looseFor;
+    if (!p) return;
+    const s = useCartStore.getState();
+    const cart = s.activeCart();
+    const line: CartItem = {
+      product_name: p.name_bangla || p.name_english || 'পণ্য', product_id: p.id,
+      quantity: grams, unit: 'gram', unit_price: unitPrice, total, checked: true, confidence: 1.0,
+      list_unit_price: Number(p.sale_price),
+    };
+    const at = cart.items.findIndex(i => i.product_id === p.id && i.unit === 'gram');
+    if (at >= 0) s.updateItem(cart.id, at, line); else s.addItem(line);
+    Toast.show({ type: 'success', text1: `✓ ${line.product_name} ${formatWeight(grams)} — ৳${total}` });
+    setLooseFor(null);
+  };
+
   // From the search dropdown: it closes on select, so confirm with a toast.
   const handleQuickAdd = (product: any) => {
+    if (isLoose(product)) { setLooseFor(product); return; }
     addToActiveCart([buildCartItem(product)]);
     Toast.show({ type: 'success', text1: `✓ ${product.name_bangla} যোগ হয়েছে` });
     warnIfOutOfStock(product);
@@ -352,6 +391,7 @@ useEffect(() => {
 
   // From the product list: the row itself flips to a − qty + stepper, no toast needed.
   const handleListAdd = React.useCallback((product: any) => {
+    if (isLoose(product)) { setLooseFor(product); return; }
     useCartStore.getState().addItem(buildCartItem(product));
     warnIfOutOfStock(product);
   }, []);
@@ -395,7 +435,7 @@ useEffect(() => {
       <InstantSearchBar
         products={activeProducts}
         onSelect={handleQuickAdd}
-        onScanPress={() => router.push('/barcode-scanner')}
+        onScanPress={() => setScanVisible(true)}
         recentProducts={recentProducts}
         frequentProducts={frequentProducts}
         onCreateProduct={handleCreateFromSearch}
@@ -419,6 +459,7 @@ useEffect(() => {
           salesCount={salesCount}
           bottomInset={activeCart.items.length > 0 ? 110 : 24}
           onAdd={handleListAdd}
+          onLoose={setLooseFor}
         />
       </View>
 
@@ -427,6 +468,24 @@ useEffect(() => {
         onUnmatchedProduct={handleUnmatchedProduct}
         onCheckoutSuccess={handleCheckoutSuccess}
         onAddMore={() => setTextModalVisible(true)}
+      />
+
+      {/* Scan: floating button + an overlay on this screen (not a route), so the customer tabs stay mounted underneath */}
+      <BarcodeScanFAB raised={activeCart.items.length > 0} onPress={() => setScanVisible(true)} />
+      <BarcodeScanSheet
+        visible={scanVisible}
+        onClose={() => setScanVisible(false)}
+        onAdd={(product) => {
+          // A scanned loose item has to be weighed: close the scanner and ask how much.
+          if (isLoose(product)) { setScanVisible(false); setLooseFor(product); return; }
+          useCartStore.getState().addItem(buildCartItem(product));
+        }}
+      />
+      <LooseQuantitySheet
+        product={looseFor}
+        currentGrams={looseLine?.quantity ?? 0}
+        onClose={() => setLooseFor(null)}
+        onConfirm={confirmLoose}
       />
 
       {/* ══ TEXT MODAL ══ */}
@@ -583,9 +642,9 @@ useEffect(() => {
                   <View key={i} style={[{ flexDirection: 'row', padding: 10, alignItems: 'center' }, i % 2 === 0 && { backgroundColor: COLORS.surfaceSecondary }]}>
                     <View style={{ flex: 2 }}>
                       <Text style={{ fontSize: FONT_SIZES.sm, fontWeight: '600', color: COLORS.text }}>{item.product_name}</Text>
-                      <Text style={{ fontSize: FONT_SIZES.xs, color: COLORS.textMuted }}>৳{item.unit_price}/{item.unit}</Text>
+                      <Text style={{ fontSize: FONT_SIZES.xs, color: COLORS.textMuted }}>{item.unit === 'gram' ? 'খোলা পণ্য' : `৳${item.unit_price}/${item.unit}`}</Text>
                     </View>
-                    <Text style={{ flex: 1, fontSize: FONT_SIZES.sm, color: COLORS.textSecondary, textAlign: 'center' }}>{item.quantity}{item.unit}</Text>
+                    <Text style={{ flex: 1, fontSize: FONT_SIZES.sm, color: COLORS.textSecondary, textAlign: 'center' }}>{item.unit === 'gram' ? formatWeight(item.quantity) : `${item.quantity}${item.unit}`}</Text>
                     <Text style={{ flex: 1, fontSize: FONT_SIZES.sm, fontWeight: '700', color: COLORS.text, textAlign: 'right' }}>৳{item.total}</Text>
                   </View>
                 ))}

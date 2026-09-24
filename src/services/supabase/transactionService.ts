@@ -1,10 +1,50 @@
-import { billingApi, BillingPayload, BillingResponse, PaymentMethod } from '../api/billingApi';
+import { billingApi, BillingPayload, BillingResponse, PaymentMethod, ServerBill } from '../api/billingApi';
 import { inventoryApi } from '../api/inventoryApi';
 import { Transaction, TransactionInput } from '../../types';
 import { useAuthStore, useTransactionStore, useProductStore } from '../../store';
 import { OfflineError } from '../api/client';
 import { v4 as uuidv4 } from 'uuid';
-import { format } from 'date-fns';
+import { format, subDays } from 'date-fns';
+
+// ── Server bills → the flat per-item Transaction rows the app screens use ──────────────────────────
+// The server groups by invoice and counts days in UTC. Bangladesh is UTC+6, so a sale made between
+// 00:00 and 06:00 local time belongs to the PREVIOUS UTC day. We therefore ask the server for one extra
+// day and then keep only what falls on the shopkeeper's own (local) calendar day.
+const localDay = (iso: string) => format(new Date(iso), 'yyyy-MM-dd');
+const dayBefore = (d: string) => format(subDays(new Date(`${d}T12:00:00`), 1), 'yyyy-MM-dd');
+
+function billsToTransactions(bills: ServerBill[]): Transaction[] {
+  const rows: Transaction[] = [];
+  for (const b of bills ?? []) {
+    (b.items ?? []).forEach((it, i) => {
+      rows.push({
+        id: `${b.invoice_number}-${i}`,
+        shop_id: b.shop_id ?? '',
+        user_id: b.user_id ?? '',
+        user_name: b.user_name ?? '',
+        type: 'sale',
+        product_id: it.product_id ?? '',
+        product_name: it.product_name,
+        quantity: Number(it.quantity),
+        unit: it.unit,
+        unit_price: Number(it.unit_price),
+        total_amount: Number(it.total_amount),
+        subtotal: Number(b.subtotal),
+        net_total: Number(b.net_total),
+        discount_type: b.discount_type ?? undefined,
+        discount_value: b.discount_value,
+        discount_amount: b.discount_amount,
+        invoice_number: b.invoice_number,
+        customer_name: b.customer_name ?? undefined,
+        payment_method: b.payment_method,
+        voided: !!b.is_voided,
+        is_synced: true,
+        created_at: b.created_at,
+      } as Transaction);
+    });
+  }
+  return rows;
+}
 
 function billingResponseToTransactions(
   res: BillingResponse,
@@ -124,9 +164,11 @@ export const transactionService = {
 
   async fetchTodayTransactions(): Promise<Transaction[]> {
     try {
-      const res = await billingApi.today();
-      useTransactionStore.getState().setTodayTransactions(res.transactions);
-      return res.transactions;
+      const today = format(new Date(), 'yyyy-MM-dd');
+      const bills = await billingApi.rangeBills(dayBefore(today), today);
+      const txns = billsToTransactions(bills).filter(t => localDay(t.created_at) === today);
+      useTransactionStore.getState().setTodayTransactions(txns);
+      return txns;
     } catch (e) {
       if (e instanceof OfflineError) {
         console.warn('Offline — using local transactions');
@@ -139,7 +181,11 @@ export const transactionService = {
 
   async fetchByDateRange(from: string, to: string): Promise<Transaction[]> {
     try {
-      return await billingApi.byDateRange(from, to);
+      const bills = await billingApi.rangeBills(dayBefore(from), to);
+      return billsToTransactions(bills).filter(t => {
+        const d = localDay(t.created_at);
+        return d >= from && d <= to;
+      });
     } catch (e) {
       if (e instanceof OfflineError) {
         console.warn('Offline — using local transactions');

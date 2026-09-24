@@ -18,7 +18,7 @@ interface Props {
   totalCount: number;
 }
 
-const MAX_VISIBLE = 10; // past this the rail folds the rest into "আরও" so it never becomes an endless scroll
+const MAX_VISIBLE = 5; // five chips fit on one screen; the rest live behind "আরও" so the rail never becomes an endless scroll
 
 /**
  * Horizontal category filter (design system's CategoryChipRail). The shop's
@@ -68,8 +68,8 @@ export default function CategoryChipRail({ categories, selected, onSelect, total
 
         {hasMore && (
           <TouchableOpacity style={[styles.chip, styles.moreChip]} onPress={() => setMoreVisible(true)} activeOpacity={0.8}>
-            <Text style={[styles.label, { color: POS.ink600 }]}>আরও</Text>
-            <Ionicons name="chevron-down" size={12} color={POS.ink600} />
+            <Ionicons name="add" size={14} color={POS.ink600} />
+            <Text style={[styles.label, { color: POS.ink600 }]}>আরও ({categories.length - visible.length})</Text>
           </TouchableOpacity>
         )}
       </ScrollView>

@@ -33,6 +33,31 @@ export interface BillingResponse {
   customer_id?: string;
 }
 
+/** One bill as the backend returns it from /billing/today and /billing/range (same shape web-pos uses). */
+export interface ServerBill {
+  invoice_number: string;
+  shop_id?: string;
+  user_id?: string;
+  user_name?: string;
+  customer_name?: string | null;
+  subtotal: number;
+  discount_type?: 'percentage' | 'amount' | null;
+  discount_value?: number;
+  discount_amount?: number;
+  net_total: number;
+  payment_method?: PaymentMethod;
+  is_voided?: boolean;
+  created_at: string;
+  items: Array<{
+    product_id: string | null;
+    product_name: string;
+    quantity: number;
+    unit: Unit;
+    unit_price: number;
+    total_amount: number;
+  }>;
+}
+
 export interface TodayBillingResponse {
   transactions: Transaction[];
   total_sales: number;
@@ -46,6 +71,11 @@ export const billingApi = {
 
   async today(): Promise<TodayBillingResponse> {
     return apiRequest<TodayBillingResponse>('GET', '/billing/today');
+  },
+
+  /** GET /billing/range?from=YYYY-MM-DD&to=YYYY-MM-DD — days are UTC days on the server. */
+  async rangeBills(from: string, to: string): Promise<ServerBill[]> {
+    return apiRequest<ServerBill[]>('GET', `/billing/range?from=${from}&to=${to}`);
   },
 
   async byDateRange(from: string, to: string): Promise<Transaction[]> {

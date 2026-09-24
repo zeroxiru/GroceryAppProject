@@ -24,7 +24,10 @@ export function formatDate(isoString: string): string {
 
 export function groupByDate(transactions: Transaction[]): Record<string, Transaction[]> {
   return transactions.reduce((acc, txn) => {
-    const date = txn.created_at.split('T')[0];
+    // Group by the shopkeeper's own (local) calendar day. created_at is UTC, so slicing the ISO string would put a
+    // 04:15 AM Bangladesh sale on the previous day.
+    const d = new Date(txn.created_at);
+    const date = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
     if (!acc[date]) acc[date] = [];
     acc[date].push(txn);
     return acc;

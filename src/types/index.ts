@@ -84,6 +84,8 @@ export interface Product {
   created_at?: string;
   updated_at: string;
   size?: string;
+  /** Loose/open item: unit='gram', sale_price PER GRAM, current_stock in GRAMS (migration 012). */
+  is_bulk?: boolean;
 }
 
 export type PaymentMethod = 'cash' | 'bkash' | 'nagad' | 'card' | 'credit';

@@ -4,6 +4,7 @@ import { Ionicons } from '@expo/vector-icons';
 import { Product } from '@/types';
 import { COLORS, FONT_SIZES } from '@/constants';
 import { ProductSearchIndex } from '@/services/search/productSearch';
+import { isLoose, formatWeight, formatPricePerKg } from '@/utils/looseUnits';
 
 interface Props {
   products: Product[];
@@ -33,7 +34,7 @@ function ProductRow({ item, onPress }: { item: Product; onPress: () => void }) {
       <View style={{ flex: 1, minWidth: 0 }}>
         <Text style={styles.resultName} numberOfLines={1}>{item.name_bangla}</Text>
         <Text style={styles.resultMeta} numberOfLines={1}>
-          {item.name_english ? `${item.name_english} · ` : ''}৳{item.sale_price} · স্টক {item.current_stock}
+          {item.name_english ? `${item.name_english} · ` : ''}{isLoose(item) ? `${formatPricePerKg(Number(item.sale_price))} · স্টক ${formatWeight(Number(item.current_stock))}` : `৳${item.sale_price} · স্টক ${item.current_stock}`}
         </Text>
       </View>
       <View style={styles.resultAddBtn}>

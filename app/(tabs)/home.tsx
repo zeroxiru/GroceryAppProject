@@ -28,16 +28,14 @@ import CategoryChipRail, { RailCategory } from '@/components/pos/CategoryChipRai
 import ProductBrowseList from '@/components/pos/ProductBrowseList';
 import BarcodeScanSheet from '@/components/pos/BarcodeScanSheet';
 import LooseQuantitySheet from '@/components/pos/LooseQuantitySheet';
+import DropdownSelect from '@/components/common/DropdownSelect';
+import { unitOptions } from '@/constants/unitOptions';
 import { isLoose, formatWeight } from '@/utils/looseUnits';
 import type { Product } from '@/types';
+import { GROCERY_CATEGORIES as GROCERY_CATEGORY_LIST } from '@/constants/groceryCategories';
 
-// The 12 approved shop categories: fixed shelf order (staples first) and Bangla names for the chip rail.
-const POS_CATEGORIES: [string, string][] = [
-  ['Rice & Grains', 'চাল ও শস্য'], ['Dal & Pulses', 'ডাল'], ['Oil & Ghee', 'তেল ও ঘি'], ['Spices', 'মসলা'],
-  ['Onion, Garlic & Veg', 'পেঁয়াজ, রসুন ও সবজি'], ['Sugar, Salt & Tea', 'চিনি, লবণ ও চা'], ['Dairy & Eggs', 'দুধ ও ডিম'],
-  ['Snacks & Biscuits', 'বিস্কুট ও স্ন্যাকস'], ['Drinks', 'পানীয়'], ['Personal Care', 'প্রসাধনী'],
-  ['Cleaning & Household', 'পরিষ্কার ও গৃহস্থালি'], ['Baby & Misc', 'শিশু ও অন্যান্য'],
-];
+// The 12 approved shop categories live in one shared list (also used by the product forms): fixed shelf order + Bangla names.
+const POS_CATEGORIES: [string, string][] = GROCERY_CATEGORY_LIST.map(c => [c.key, c.bn]);
 const POS_CATEGORY_BN: Record<string, string> = Object.fromEntries(POS_CATEGORIES);
 const POS_CATEGORY_ORDER: Record<string, number> = Object.fromEntries(POS_CATEGORIES.map(([k], i) => [k, i]));
 
@@ -575,20 +573,17 @@ useEffect(() => {
                     style={{ flex: 1, borderWidth: 1, borderColor: COLORS.border, borderRadius: 10, height: 48, paddingHorizontal: 14, fontSize: FONT_SIZES.md, color: COLORS.text, backgroundColor: COLORS.surfaceSecondary }}
                     value={f.value} onChangeText={f.set} placeholder={f.placeholder} placeholderTextColor={COLORS.textMuted} keyboardType={f.numeric ? 'numeric' : 'default'}
                   />
-                  {f.voice && <VoiceDictationButton onResult={f.set} />}
+                  {f.voice && <VoiceDictationButton onResult={(t: string) => f.set(f.value?.trim() ? `${f.value.trim()} ${t}` : t)} />}
                 </View>
               </View>
             ))}
-            <View style={{ gap: 6 }}>
-              <Text style={{ fontSize: FONT_SIZES.sm, fontWeight: '600', color: COLORS.text }}>একক</Text>
-              <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 8 }}>
-                {['kg', 'gram', 'litre', 'ml', 'piece', 'dozen', 'packet'].map(u => (
-                  <TouchableOpacity key={u} style={[{ paddingHorizontal: 14, paddingVertical: 8, borderRadius: 20, borderWidth: 1, borderColor: COLORS.border }, pendingProductUnit === u && { backgroundColor: COLORS.primary, borderColor: COLORS.primary }]} onPress={() => setPendingProductUnit(u)}>
-                    <Text style={[{ fontSize: FONT_SIZES.sm, color: COLORS.textSecondary }, pendingProductUnit === u && { color: '#fff', fontWeight: '700' }]}>{u}</Text>
-                  </TouchableOpacity>
-                ))}
-              </View>
-            </View>
+            <DropdownSelect
+              label="একক"
+              title="একক বাছাই করুন"
+              value={pendingProductUnit}
+              options={unitOptions()}
+              onChange={setPendingProductUnit}
+            />
             <TouchableOpacity style={{ backgroundColor: COLORS.primary, borderRadius: 14, height: 52, alignItems: 'center', justifyContent: 'center' }} onPress={handleAddNewProduct}>
               <Text style={{ color: '#fff', fontSize: FONT_SIZES.md, fontWeight: '700' }}>পণ্য যোগ করুন ✓</Text>
             </TouchableOpacity>

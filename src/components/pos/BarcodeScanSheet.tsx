@@ -1,7 +1,10 @@
-import React, { useEffect, useRef, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
+import DropdownSelect from '@/components/common/DropdownSelect';
+import { unitOptions } from '@/constants/unitOptions';
 import {
   View, Text, TouchableOpacity, Modal, TextInput, ScrollView, ActivityIndicator,
   Animated, Easing, KeyboardAvoidingView, StyleSheet,
+  Alert,
 } from 'react-native';
 import { CameraView, Camera } from 'expo-camera';
 import * as Haptics from 'expo-haptics';
@@ -11,6 +14,8 @@ import { Product, GlobalProduct, Unit } from '@/types';
 import { useProductStore } from '@/store';
 import { barcodeService } from '@/services/barcode/barcodeService';
 import { productService } from '@/services/supabase/productService';
+import { productApi } from '@/services/api/productApi';
+import { ProductSearchIndex } from '@/services/search/productSearch';
 import { POS } from '@/constants/posTokens';
 import { FONT_SIZES } from '@/constants';
 import VoiceDictationButton from './VoiceDictationButton';
@@ -47,6 +52,9 @@ export default function BarcodeScanSheet({ visible, onClose, onAdd }: Props) {
   const [creating, setCreating] = useState(false);
   const [form, setForm] = useState({ name: '', price: '', unit: 'piece' as Unit });
   const [formError, setFormError] = useState('');
+  const [linking, setLinking] = useState(false);          // "this pack already exists in the shop — attach this barcode to it"
+  const [linkQuery, setLinkQuery] = useState('');
+  const linkIndexRef = useRef<ProductSearchIndex | null>(null);
   const [manualOpen, setManualOpen] = useState(false);
   const [manualText, setManualText] = useState('');
 
@@ -64,7 +72,7 @@ export default function BarcodeScanSheet({ visible, onClose, onAdd }: Props) {
   // Fresh session each time the sheet opens.
   useEffect(() => {
     if (!visible) return;
-    setCount(0); setAdded(null); setUnknown(null); setCreating(false); setFormError('');
+    setCount(0); setAdded(null); setUnknown(null); setCreating(false); setLinking(false); setFormError('');
     setManualOpen(false); setManualText(''); setTorch(false);
     lastCodeRef.current = ''; lastSeenRef.current = 0; bufferRef.current.clear();
     Camera.requestCameraPermissionsAsync().then(r => setPerm(r.status === 'granted')).catch(() => setPerm(false));
@@ -152,7 +160,7 @@ export default function BarcodeScanSheet({ visible, onClose, onAdd }: Props) {
   };
 
   const resume = () => {
-    setUnknown(null); setCreating(false); setFormError('');
+    setUnknown(null); setCreating(false); setLinking(false); setFormError('');
     lastCodeRef.current = ''; // the same code may be scanned again, e.g. after fixing the label
   };
 
@@ -199,6 +207,54 @@ export default function BarcodeScanSheet({ visible, onClose, onAdd }: Props) {
     } finally {
       setBusy(false);
     }
+  };
+
+  // ── Attach the scanned barcode to a product the shop already has ─────────────────────────────────────
+  // For a pack that says "unknown" although the product exists (its stored barcode was mistyped or came from
+  // old data). Search by name, tap the product, and the real barcode is saved on it — no duplicate product.
+  const linkResults = useMemo(
+    () => (linking && linkQuery.trim() ? (linkIndexRef.current?.search(linkQuery.trim(), 8) ?? []) : []),
+    [linking, linkQuery],
+  );
+
+  const startLink = () => {
+    linkIndexRef.current = new ProductSearchIndex(useProductStore.getState().products);
+    setLinkQuery('');
+    setFormError('');
+    setLinking(true);
+  };
+
+  const confirmLink = async (product: Product) => {
+    if (!unknown) return;
+    setBusy(true);
+    setFormError('');
+    try {
+      const updated = await productApi.update(product.id, { barcode: unknown.code });
+      const merged: Product = { ...product, ...updated, barcode: unknown.code };
+      const { products, setProducts } = useProductStore.getState();
+      setProducts(products.map(p => (p.id === product.id ? merged : p)));
+      addProduct(merged);
+      resume();
+    } catch (e: any) {
+      const msg = String(e?.message ?? '');
+      setFormError(/duplicate|unique|already|409/i.test(msg)
+        ? 'এই বারকোড অন্য একটি পণ্যে আগে থেকেই আছে'
+        : (msg || 'বারকোড যুক্ত করা যায়নি'));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const linkTo = (product: Product) => {
+    if (!unknown) return;
+    Alert.alert(
+      'বারকোড যুক্ত করবেন?',
+      `${product.name_bangla || product.name_english}\n\nনতুন বারকোড: ${unknown.code}${product.barcode ? `\nপুরনো বারকোড: ${product.barcode}` : ''}`,
+      [
+        { text: 'না', style: 'cancel' },
+        { text: 'হ্যাঁ, যুক্ত করুন', onPress: () => { confirmLink(product); } },
+      ],
+    );
   };
 
   const submitManual = () => {
@@ -316,15 +372,48 @@ export default function BarcodeScanSheet({ visible, onClose, onAdd }: Props) {
                 </Text>
               )}
 
-              {!creating ? (
-                <View style={{ flexDirection: 'row', gap: 10, marginTop: 4 }}>
-                  <TouchableOpacity style={[styles.lightBtn, { flex: 1 }]} onPress={resume}>
-                    <Text style={styles.lightTxt}>আবার স্ক্যান</Text>
+              {linking ? (
+                <>
+                  <Text style={styles.label}>কোন পণ্যের বারকোড এটি? নাম লিখে খুঁজুন</Text>
+                  <TextInput
+                    style={styles.input}
+                    value={linkQuery}
+                    onChangeText={setLinkQuery}
+                    placeholder="পণ্যের নাম"
+                    placeholderTextColor={POS.ink400}
+                    autoFocus
+                  />
+                  {linkQuery.trim().length > 0 && linkResults.length === 0 && (
+                    <Text style={styles.sheetSub}>কোনো পণ্য পাওয়া যায়নি</Text>
+                  )}
+                  {linkResults.map(pr => (
+                    <TouchableOpacity key={pr.id} style={styles.linkRow} onPress={() => linkTo(pr)} disabled={busy}>
+                      <Text style={styles.linkName} numberOfLines={1}>{pr.name_bangla || pr.name_english}</Text>
+                      <Text style={styles.linkMeta} numberOfLines={1}>
+                        {pr.name_english ? `${pr.name_english} · ` : ''}৳{pr.sale_price}{pr.barcode ? ` · ${pr.barcode}` : ' · বারকোড নেই'}
+                      </Text>
+                    </TouchableOpacity>
+                  ))}
+                  {!!formError && <Text style={styles.error}>{formError}</Text>}
+                  <TouchableOpacity style={styles.lightBtn} onPress={() => { setLinking(false); setFormError(''); }} disabled={busy}>
+                    <Text style={styles.lightTxt}>বাতিল</Text>
                   </TouchableOpacity>
-                  <TouchableOpacity style={[styles.primaryBtn, { flex: 1.4 }]} onPress={startCreate}>
-                    <Text style={styles.primaryTxt}>{g ? 'দোকানে যোগ করুন' : 'নতুন পণ্য যোগ করুন'}</Text>
+                </>
+              ) : !creating ? (
+                <>
+                  <View style={{ flexDirection: 'row', gap: 10, marginTop: 4 }}>
+                    <TouchableOpacity style={[styles.lightBtn, { flex: 1 }]} onPress={resume}>
+                      <Text style={styles.lightTxt}>আবার স্ক্যান</Text>
+                    </TouchableOpacity>
+                    <TouchableOpacity style={[styles.primaryBtn, { flex: 1.4 }]} onPress={startCreate}>
+                      <Text style={styles.primaryTxt}>{g ? 'দোকানে যোগ করুন' : 'নতুন পণ্য যোগ করুন'}</Text>
+                    </TouchableOpacity>
+                  </View>
+                  <TouchableOpacity style={styles.linkBtn} onPress={startLink}>
+                    <Ionicons name="link-outline" size={18} color={POS.brand600} />
+                    <Text style={styles.linkBtnTxt}>আগে থেকে দোকানে আছে? পণ্য খুঁজে বারকোড যুক্ত করুন</Text>
                   </TouchableOpacity>
-                </View>
+                </>
               ) : (
                 <>
                   <Text style={styles.label}>পণ্যের নাম *</Text>
@@ -337,7 +426,7 @@ export default function BarcodeScanSheet({ visible, onClose, onAdd }: Props) {
                       placeholderTextColor={POS.ink400}
                       autoFocus
                     />
-                    <VoiceDictationButton onResult={v => setForm(f => ({ ...f, name: v }))} />
+                    <VoiceDictationButton onResult={v => setForm(f => ({ ...f, name: f.name.trim() ? `${f.name.trim()} ${v}` : v }))} />
                   </View>
                   <Text style={styles.label}>বিক্রয় মূল্য (৳) *</Text>
                   <TextInput
@@ -348,14 +437,13 @@ export default function BarcodeScanSheet({ visible, onClose, onAdd }: Props) {
                     placeholder="0"
                     placeholderTextColor={POS.ink400}
                   />
-                  <Text style={styles.label}>একক</Text>
-                  <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 8 }}>
-                    {UNITS.map(u => (
-                      <TouchableOpacity key={u} style={[styles.unitChip, form.unit === u && styles.unitOn]} onPress={() => setForm(f => ({ ...f, unit: u }))}>
-                        <Text style={[styles.unitTxt, form.unit === u && { color: '#fff', fontWeight: '700' }]}>{u}</Text>
-                      </TouchableOpacity>
-                    ))}
-                  </View>
+                  <DropdownSelect
+                    label="একক"
+                    title="একক বাছাই করুন"
+                    value={form.unit}
+                    options={unitOptions()}
+                    onChange={v => setForm(f => ({ ...f, unit: v as Unit }))}
+                  />
                   {!!formError && <Text style={styles.error}>{formError}</Text>}
                   <View style={{ flexDirection: 'row', gap: 10, marginTop: 4 }}>
                     <TouchableOpacity style={[styles.lightBtn, { flex: 1 }]} onPress={resume} disabled={busy}>
@@ -443,6 +531,11 @@ const styles = StyleSheet.create({
   sheetSub: { fontSize: FONT_SIZES.sm, color: POS.ink600 },
   label: { fontSize: FONT_SIZES.sm, fontWeight: '600', color: POS.ink900, marginTop: 4 },
   input: { borderWidth: 1.5, borderColor: POS.border600, borderRadius: 12, height: 50, paddingHorizontal: 14, fontSize: FONT_SIZES.md, color: POS.ink900, backgroundColor: '#fff' },
+  linkBtn: { flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 8, paddingVertical: 13, borderRadius: 14, borderWidth: 1.5, borderColor: POS.brand600 },
+  linkBtnTxt: { color: POS.brand600, fontSize: FONT_SIZES.sm, fontWeight: '700', flexShrink: 1, textAlign: 'center' },
+  linkRow: { paddingVertical: 12, paddingHorizontal: 14, borderRadius: 12, borderWidth: 1, borderColor: POS.border200, backgroundColor: '#fff' },
+  linkName: { fontSize: FONT_SIZES.md, fontWeight: '700', color: POS.ink900 },
+  linkMeta: { fontSize: FONT_SIZES.xs, color: POS.ink600, marginTop: 2 },
   unitChip: { paddingHorizontal: 14, paddingVertical: 8, borderRadius: 999, borderWidth: 1, borderColor: POS.border600 },
   unitOn: { backgroundColor: POS.brand600, borderColor: POS.brand600 },
   unitTxt: { fontSize: FONT_SIZES.sm, color: POS.ink600 },

@@ -17,6 +17,9 @@ import { Product } from '@/types';
 import { COLORS, FONT_SIZES } from '@/constants';
 import { format, differenceInDays, parseISO } from 'date-fns';
 import VoiceDictationButton from '@/components/pos/VoiceDictationButton';
+import DropdownSelect, { DropdownOption } from '@/components/common/DropdownSelect';
+import { GROCERY_CATEGORIES as GROCERY_CATEGORY_LIST, DEFAULT_GROCERY_CATEGORY } from '@/constants/groceryCategories';
+import { UNITS } from '@/constants';
 import { ProductSearchIndex } from '@/services/search/productSearch';
 
 // ── Constants ──
@@ -26,10 +29,9 @@ const ORIGIN_COUNTRIES = [
   'Malaysia', 'Singapore', 'Canada', 'Australia', 'Other',
 ];
 
-const GROCERY_CATEGORIES = [
-  'grain', 'oil', 'spice', 'essential', 'vegetable',
-  'dairy', 'drink', 'snack', 'beverage', 'toiletry', 'other',
-];
+// Grocery shops use the 12 approved categories only (no apparel / mobile / electronics lists).
+const GROCERY_CATEGORIES = GROCERY_CATEGORY_LIST.map(c => c.key);
+const GROCERY_BN: Record<string, string> = Object.fromEntries(GROCERY_CATEGORY_LIST.map(c => [c.key, c.bn]));
 
 const COSMETICS_CATEGORIES = [
   'Hair Care', 'Skin Care', 'Face Care', 'Body Care',
@@ -133,7 +135,7 @@ export default function InventoryScreen() {
         <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' }}>
           <Text style={styles.title}>{isCosmetics ? 'Inventory' : 'ইনভেন্টরি'}</Text>
         </View>
-        <Text style={styles.subtitle}>0 {isCosmetics ? 'Products' : 'টি পণ্য'}</Text>
+        <Text style={styles.subtitle}>{(products ?? []).length} {isCosmetics ? 'Products' : 'টি পণ্য'}</Text>
       </View>
 
       {/* Tab bar */}
@@ -180,7 +182,7 @@ export default function InventoryScreen() {
           {/* Category filter chips */}
           <ScrollView
             horizontal showsHorizontalScrollIndicator={false}
-            style={{ maxHeight: 44 }}
+            style={{ maxHeight: 52, flexGrow: 0 }}
             contentContainerStyle={{ paddingHorizontal: 12, gap: 8, alignItems: 'center' }}
           >
             <TouchableOpacity style={[styles.catChip, !filterCategory && styles.catChipActive]} onPress={() => setFilterCategory(null)}>
@@ -188,7 +190,7 @@ export default function InventoryScreen() {
             </TouchableOpacity>
             {categories.map(cat => (
               <TouchableOpacity key={cat} style={[styles.catChip, filterCategory === cat && styles.catChipActive]} onPress={() => setFilterCategory(filterCategory === cat ? null : cat)}>
-                <Text style={[styles.catChipTxt, filterCategory === cat && { color: '#fff' }]}>{cat}</Text>
+                <Text style={[styles.catChipTxt, filterCategory === cat && { color: '#fff' }]}>{GROCERY_BN[cat] ?? cat}</Text>
               </TouchableOpacity>
             ))}
           </ScrollView>
@@ -404,6 +406,20 @@ function ProductModal({ visible, product, shopId, shopType, shopDefaultDiscount,
     : shopType === 'imported' ? IMPORTED_CATEGORIES
     : GROCERY_CATEGORIES;
 
+  // Dropdown options: every unit, and the shop type's own categories. A product saved earlier with a category that is
+  // not in the list is kept as an extra option, so opening it to edit never silently changes its category.
+  const unitOptions: DropdownOption[] = ALL_UNITS.map(u => ({
+    value: u,
+    label: (UNITS as any)[u]?.bangla ?? u,
+    hint: (UNITS as any)[u]?.label ?? u,
+  }));
+  const categoryOptions: DropdownOption[] = categories.map(c => ({
+    value: c,
+    label: isCosmetics ? c : (GROCERY_BN[c] ?? c),
+    hint: isCosmetics ? undefined : c,
+  }));
+  if (category && !categories.includes(category)) categoryOptions.push({ value: category, label: category, hint: 'পুরনো ক্যাটাগরি' });
+
   useEffect(() => {
     if (product) {
       setName(product.name_bangla ?? '');
@@ -425,7 +441,7 @@ function ProductModal({ visible, product, shopId, shopType, shopDefaultDiscount,
       setUnit('piece'); setSalePrice(''); setPurchasePrice('');
       setMrp(''); setStock('0'); setMinStock('5'); setBarcode('');
       setOriginCountry(''); setExpiryDate('');
-      setCategory(isCosmetics ? 'Skin Care' : 'other');
+      setCategory(isCosmetics ? 'Skin Care' : '');   // grocery: nothing pre-selected; on save an empty category goes to "Baby & Misc"
     }
     setMrpAutoApplied(false);
   }, [product, visible]);
@@ -458,11 +474,12 @@ function ProductModal({ visible, product, shopId, shopType, shopDefaultDiscount,
       const payload: any = {
         shop_id: shopId,
         name_bangla: name || nameEn,
-        name_english: nameEn || name,
-        brand: brand || undefined,
+        // English name and brand are always saved with a capital at the start of each word, however they were entered.
+        name_english: nameEn.trim() ? toTitleCase(nameEn.trim()) : name,
+        brand: brand.trim() ? toTitleCase(brand.trim()) : undefined,
         size: size || undefined,
         unit,
-        category: category || 'other',
+        category: category || (isCosmetics ? 'other' : DEFAULT_GROCERY_CATEGORY),
         sale_price: parseFloat(salePrice) || 0,
         purchase_price: purchasePriceNum,
         cost_price: purchasePriceNum,
@@ -577,55 +594,38 @@ function ProductModal({ visible, product, shopId, shopType, shopDefaultDiscount,
 
           {/* Name */}
           {isCosmetics ? (
-            <Field label="Product Name *" value={nameEn} onChangeText={setNameEn} placeholder="e.g. Vaseline Body Lotion 400ML" voiceDictation />
+            <Field label="Product Name *" value={nameEn} onChangeText={setNameEn} placeholder="e.g. Vaseline Body Lotion 400ML" voiceDictation voiceLang="en-US" titleCase />
           ) : (
             <>
               <Field label="পণ্যের নাম (বাংলা) *" value={name} onChangeText={setName} placeholder="যেমন: চাল" voiceDictation />
-              <Field label="ইংরেজি নাম" value={nameEn} onChangeText={setNameEn} placeholder="Rice" />
+              <Field label="ইংরেজি নাম" value={nameEn} onChangeText={setNameEn} placeholder="Rice" voiceDictation voiceLang="en-US" titleCase />
             </>
           )}
 
           {/* Brand */}
-          <Field label={isCosmetics ? 'Brand' : 'ব্র্যান্ড'} value={brand} onChangeText={setBrand} placeholder="Vaseline, Nivea, AOX" />
+          <Field label={isCosmetics ? 'Brand' : 'ব্র্যান্ড'} value={brand} onChangeText={setBrand} placeholder="Vaseline, Nivea, AOX" voiceDictation voiceLang="en-US" titleCase />
 
           {/* Size/Variant */}
-          <Field label={isCosmetics ? 'Size / Variant' : 'সাইজ'} value={size} onChangeText={setSize} placeholder="400ML, 200GM, 1L" />
+          <Field label={isCosmetics ? 'Size / Variant' : 'সাইজ'} value={size} onChangeText={setSize} placeholder="400ML, 200GM, 1L" voiceDictation voiceLang="en-US" />
 
-          {/* Unit */}
-          <View style={{ gap: 6 }}>
-            <Text style={styles.fieldLabel}>{isCosmetics ? 'Unit' : 'একক'} *</Text>
-            <ScrollView horizontal showsHorizontalScrollIndicator={false}>
-              <View style={{ flexDirection: 'row', gap: 8 }}>
-                {ALL_UNITS.map(u => (
-                  <TouchableOpacity
-                    key={u}
-                    style={[styles.unitBtn, unit === u && styles.unitBtnActive]}
-                    onPress={() => setUnit(u)}
-                  >
-                    <Text style={[styles.unitBtnTxt, unit === u && { color: '#fff', fontWeight: '700' }]}>{u}</Text>
-                  </TouchableOpacity>
-                ))}
-              </View>
-            </ScrollView>
-          </View>
+          {/* Unit — dropdown, every unit visible in one list */}
+          <DropdownSelect
+            label={(isCosmetics ? 'Unit' : 'একক') + ' *'}
+            title={isCosmetics ? 'Choose unit' : 'একক বাছাই করুন'}
+            value={unit}
+            options={unitOptions}
+            onChange={setUnit}
+          />
 
-          {/* Category */}
-          <View style={{ gap: 6 }}>
-            <Text style={styles.fieldLabel}>{isCosmetics ? 'Category' : 'ক্যাটাগরি'}</Text>
-            <ScrollView horizontal showsHorizontalScrollIndicator={false}>
-              <View style={{ flexDirection: 'row', gap: 8 }}>
-                {categories.map(cat => (
-                  <TouchableOpacity
-                    key={cat}
-                    style={[styles.unitBtn, category === cat && styles.unitBtnActive]}
-                    onPress={() => setCategory(cat)}
-                  >
-                    <Text style={[styles.unitBtnTxt, category === cat && { color: '#fff', fontWeight: '700' }]}>{cat}</Text>
-                  </TouchableOpacity>
-                ))}
-              </View>
-            </ScrollView>
-          </View>
+          {/* Category — dropdown, only this shop type's categories */}
+          <DropdownSelect
+            label={isCosmetics ? 'Category' : 'ক্যাটাগরি'}
+            title={isCosmetics ? 'Choose category' : 'ক্যাটাগরি বাছাই করুন'}
+            placeholder={isCosmetics ? 'Choose category' : 'ক্যাটাগরি বাছাই করুন'}
+            value={category}
+            options={categoryOptions}
+            onChange={setCategory}
+          />
 
           {/* ── SECTION 2: Pricing ── */}
           <Text style={styles.sectionLabel}>💰 {isCosmetics ? 'Pricing' : 'মূল্য তথ্য'}</Text>
@@ -1827,14 +1827,33 @@ function DamageLossModal({ visible, product, isCosmetics, onClose, onSaved }: an
   );
 }
 
+// "ifad peelo chips" -> "Ifad Peelo Chips". Capital at the start of every word (and after - / or a bracket), the rest of the word
+// is left exactly as spoken/typed, so "AOX" and "Coca-Cola" survive. Only Latin letters are touched (Bangla has no case).
+function toTitleCase(text: string): string {
+  return text.replace(/(^|[\s\-\/(])([a-z])/g, (_m, sep: string, ch: string) => sep + ch.toUpperCase());
+}
+
 // ── Reusable field component ──
-function Field({ label, value, onChangeText, placeholder, numeric, voiceDictation }: {
+function Field({ label, value, onChangeText, placeholder, numeric, voiceDictation, voiceLang, titleCase }: {
   label: string; value: string;
   onChangeText: (t: string) => void;
   placeholder?: string; numeric?: boolean;
   /** Adds a mic button that dictates straight into this field — see VoiceDictationButton. */
   voiceDictation?: boolean;
+  /** Recognition language for the mic: 'bn-BD' (default) for Bangla fields, 'en-US' for English name / brand / size. */
+  voiceLang?: string;
+  /** English names and brands: every word starts with a capital, both for dictated and typed text. */
+  titleCase?: boolean;
 }) {
+  // Dictation ADDS to what is already typed instead of replacing it, and the field stays a normal text box, so the
+  // shopkeeper can speak, then fix a word by hand, then speak the next word.
+  const latest = useRef(value);
+  latest.current = value;
+  const appendSpoken = (spoken: string) => {
+    const cur = (latest.current ?? '').trim();
+    const said = titleCase ? toTitleCase(spoken) : spoken;
+    onChangeText(cur ? `${cur} ${said}` : said);
+  };
   return (
     <View style={{ gap: 6 }}>
       <Text style={styles.fieldLabel}>{label}</Text>
@@ -1846,8 +1865,10 @@ function Field({ label, value, onChangeText, placeholder, numeric, voiceDictatio
             onChangeText={onChangeText}
             placeholder={placeholder}
             placeholderTextColor={COLORS.textMuted}
+            autoCorrect={false}
+            autoCapitalize={titleCase ? 'words' : 'none'}
           />
-          <VoiceDictationButton onResult={onChangeText} />
+          <VoiceDictationButton onResult={appendSpoken} lang={voiceLang} />
         </View>
       ) : (
         <TextInput
@@ -1879,7 +1900,8 @@ const styles = StyleSheet.create({
   searchInput: { flex: 1, fontSize: FONT_SIZES.sm, color: COLORS.text, paddingHorizontal: 10 },
   catChip: { paddingHorizontal: 14, paddingVertical: 6, borderRadius: 20, borderWidth: 1, borderColor: COLORS.border, backgroundColor: '#fff' },
   catChipActive: { backgroundColor: COLORS.primary, borderColor: COLORS.primary },
-  catChipTxt: { fontSize: FONT_SIZES.xs, color: COLORS.textSecondary, fontWeight: '600' },
+  // Bangla needs a tall line box or the tops of the letters are clipped inside the chip
+  catChipTxt: { fontSize: FONT_SIZES.xs, lineHeight: 22, color: COLORS.textSecondary, fontWeight: '600' },
   productCard: { flexDirection: 'row', backgroundColor: COLORS.surface, borderRadius: 12, padding: 14, borderWidth: 0.5, borderColor: COLORS.border },
   productName: { fontSize: FONT_SIZES.md, fontWeight: '700', color: COLORS.text },
   stockNum: { fontSize: FONT_SIZES.xxl, fontWeight: '700', color: COLORS.primary },

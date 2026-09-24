@@ -174,16 +174,32 @@ export const transactionService = {
   },
 
   async syncPending(): Promise<void> {
-    const { pendingBills, clearPendingBills } = useTransactionStore.getState();
+    const { pendingBills } = useTransactionStore.getState();
     if (pendingBills.length === 0) return;
-    const results = await Promise.allSettled(pendingBills.map(b => billingApi.create(b)));
-    const allOk = results.every(r => r.status === 'fulfilled');
-    if (allOk) {
-      clearPendingBills();
-      console.log(`Synced ${pendingBills.length} pending bills`);
-    } else {
-      const failed = results.filter(r => r.status === 'rejected').length;
-      console.warn(`${failed} bills failed to sync — will retry`);
+    const snapshot = pendingBills; // fixed reference for this pass — see the filter below
+    const results = await Promise.allSettled(snapshot.map(b => billingApi.create(b)));
+
+    // Only drop the bills that actually succeeded. Clearing the whole queue
+    // on any single failure (the old behavior) meant one permanently-bad
+    // bill — e.g. referencing a product that no longer exists — jammed the
+    // entire queue: every retry re-submitted the already-succeeded bills
+    // again, and billingApi.create() isn't idempotent, so they'd duplicate
+    // on the server every single sync attempt.
+    const succeededSet = new Set(
+      snapshot.filter((_, i) => results[i].status === 'fulfilled')
+    );
+    if (succeededSet.size > 0) {
+      const remaining = useTransactionStore.getState().pendingBills.filter(b => !succeededSet.has(b));
+      useTransactionStore.setState({ pendingBills: remaining });
+    }
+
+    const failedCount = results.length - succeededSet.size;
+    if (succeededSet.size > 0) console.log(`Synced ${succeededSet.size} pending bill(s)`);
+    if (failedCount > 0) {
+      results.forEach((r, i) => {
+        if (r.status === 'rejected') console.warn('Pending bill still failing to sync:', r.reason?.message ?? r.reason, snapshot[i]);
+      });
+      console.warn(`${failedCount} bill(s) failed to sync — will retry next time, kept in the queue`);
     }
   },
 };

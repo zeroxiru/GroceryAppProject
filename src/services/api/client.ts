@@ -33,21 +33,65 @@ export const tokenStore = {
   },
 };
 
-async function refreshAccessToken(): Promise<string | null> {
+// ─── Session-expired notification ──────────────────────────────────────────
+// client.ts is a plain service module, not a component — it can't navigate
+// directly. The root layout subscribes here once at startup and decides how
+// to react (toast + redirect to pin-login), so every screen gets consistent
+// behavior instead of each call site handling a 401 on its own.
+type SessionExpiredListener = () => void;
+let sessionExpiredListener: SessionExpiredListener | null = null;
+
+export function onSessionExpired(listener: SessionExpiredListener): () => void {
+  sessionExpiredListener = listener;
+  return () => { sessionExpiredListener = null; };
+}
+
+// ─── Token refresh ──────────────────────────────────────────────────────────
+// Two outcomes that used to be conflated as "refresh failed → log out":
+//   'invalid' — the server rejected the refresh token. The session really is
+//               over; clear tokens and notify the app to redirect to login.
+//   'offline' — the refresh request couldn't even reach the server. The
+//               session may still be perfectly valid; do NOT clear tokens or
+//               log the shopkeeper out just for losing signal (offline-first).
+type RefreshOutcome =
+  | { ok: true; accessToken: string }
+  | { ok: false; reason: 'invalid' | 'offline' };
+
+// Concurrent 401s (several in-flight requests landing at once) must share ONE
+// refresh attempt. Without this, two requests can each read the same
+// still-valid refresh token and race to redeem it — if the backend rotates
+// (single-use) refresh tokens, the loser's redemption fails and used to wipe
+// both tokens even though the session was still genuinely good.
+let refreshInFlight: Promise<RefreshOutcome> | null = null;
+
+function refreshAccessToken(): Promise<RefreshOutcome> {
+  if (!refreshInFlight) {
+    refreshInFlight = doRefresh().finally(() => { refreshInFlight = null; });
+  }
+  return refreshInFlight;
+}
+
+async function doRefresh(): Promise<RefreshOutcome> {
   const refreshToken = await tokenStore.getRefresh();
-  if (!refreshToken) return null;
+  if (!refreshToken) return { ok: false, reason: 'invalid' };
+
+  let res: Response;
   try {
-    const res = await fetch(`${BASE_URL}/auth/refresh-token`, {
+    res = await fetch(`${BASE_URL}/auth/refresh-token`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ refreshToken }),
     });
-    if (!res.ok) { await tokenStore.clear(); return null; }
-    const json = await res.json();
-    const data = json?.data ?? json;
-    await tokenStore.set(data.accessToken, data.refreshToken ?? refreshToken);
-    return data.accessToken;
-  } catch { return null; }
+  } catch {
+    return { ok: false, reason: 'offline' };
+  }
+
+  if (!res.ok) return { ok: false, reason: 'invalid' };
+
+  const json = await res.json();
+  const data = json?.data ?? json;
+  await tokenStore.set(data.accessToken, data.refreshToken ?? refreshToken);
+  return { ok: true, accessToken: data.accessToken };
 }
 
 export async function apiRequest<T>(
@@ -73,8 +117,12 @@ export async function apiRequest<T>(
   }
 
   if (res.status === 401 && retry) {
-    const newToken = await refreshAccessToken();
-    if (newToken) return apiRequest<T>(method, path, body, false);
+    const outcome = await refreshAccessToken();
+    if (outcome.ok) return apiRequest<T>(method, path, body, false);
+    if (outcome.reason === 'offline') throw new OfflineError();
+    // reason === 'invalid': the session is genuinely over.
+    await tokenStore.clear();
+    sessionExpiredListener?.();
     throw new ApiError(401, 'Session expired');
   }
 

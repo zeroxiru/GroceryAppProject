@@ -1,6 +1,7 @@
 import Fuse from 'fuse.js';
 import { ParsedCommand, Product, Unit, TransactionType } from '../../types';
 import { BANGLA_NUMBERS, NLU_SALE_KEYWORDS, NLU_PURCHASE_KEYWORDS, NLU_STOCK_KEYWORDS, NLU_SUMMARY_KEYWORDS } from '../../constants';
+import { buildProductFuseIndex } from '../search/productSearch';
 
 const DIALECT_MAP: Record<string, string> = {
   'চাউল': 'চাল', 'সইরষা': 'সরিষা', 'আইছে': 'কিনলাম',
@@ -72,20 +73,8 @@ export class NLUService {
   }
 
  private buildIndex(products: Product[]) {
-  return new Fuse(products, {
-    keys: [
-      { name: 'name_bangla', weight: 2 },
-      { name: 'aliases', weight: 3 },  // aliases get highest weight
-      { name: 'name_english', weight: 1 },
-    ],
-    threshold: 0.35,        // relaxed from 0.15
-    includeScore: true,
-    minMatchCharLength: 2,  // reduced from 3
-    shouldSort: true,
-    useExtendedSearch: false,
-    ignoreLocation: true,   // KEY: ignores where in string match occurs
-    distance: 200,          // allows match anywhere in string
-  });
+  // Shared with the POS screen's live search bar — see src/services/search/productSearch.ts.
+  return buildProductFuseIndex(products);
 }
 
   updateProducts(products: Product[]) {

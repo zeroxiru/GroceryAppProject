@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import {
   View, Text, StyleSheet, FlatList, TouchableOpacity,
   TextInput, Alert, Modal, ActivityIndicator, ScrollView,
@@ -15,6 +15,8 @@ import { Supplier } from '@/types';
 import { Product } from '@/types';
 import { COLORS, FONT_SIZES } from '@/constants';
 import { format, differenceInDays, parseISO } from 'date-fns';
+import VoiceDictationButton from '@/components/pos/VoiceDictationButton';
+import { ProductSearchIndex } from '@/services/search/productSearch';
 
 // ── Constants ──
 const ORIGIN_COUNTRIES = [
@@ -83,15 +85,23 @@ export default function InventoryScreen() {
     finally { setLoading(false); }
   };
 
+  // Same fuzzy/typo-tolerant index used on the POS search bar (src/services/search/productSearch.ts)
+  // — one search quality everywhere, not a plain substring match here and fuzzy elsewhere.
+  const searchIndex = React.useMemo(() => new ProductSearchIndex(products || []), [products]);
+  const fuzzyMatchIds = React.useMemo(() => {
+    if (!search.trim()) return null;
+    return new Set(searchIndex.search(search, 500).map(p => p.id));
+  }, [searchIndex, search]);
+
   const filtered = (products || []).filter(p => {
-      if (!p) return false;
-    const matchSearch = !search
-      || p.name_bangla?.toLowerCase().includes(search.toLowerCase())
-      || (p.name_english?.toLowerCase().includes(search.toLowerCase()) ?? false)
-      || ((p as any).brand?.toLowerCase().includes(search.toLowerCase()) ?? false)
-      || ((p as any).barcode?.includes(search) ?? false);
+    if (!p) return false;
     const matchCat = !filterCategory || p.category === filterCategory;
-    return matchSearch && matchCat;
+    if (!matchCat) return false;
+    const q = search.trim();
+    if (!q) return true;
+    // Exact barcode/short-code substring still surfaces even where the fuzzy index misses it.
+    const matchBarcodeExact = (p as any).barcode?.toLowerCase().includes(q.toLowerCase()) ?? false;
+    return fuzzyMatchIds!.has(p.id) || matchBarcodeExact;
   });
 
   const lowStockCount = (products || []).filter(
@@ -317,6 +327,72 @@ function ProductModal({ visible, product, shopId, shopType, shopDefaultDiscount,
   const [showBarcodeScanner, setShowBarcodeScanner] = useState(false);
   const [cameraPermission, setCameraPermission] = useState<boolean | null>(null);
 
+  // Scan accuracy refs — mirrors the logic in barcode-scanner.tsx
+  const invCooldownRef = useRef(false);
+  const invLastScanned = useRef('');
+  const invScanBufferRef = useRef<Map<string, number>>(new Map());
+  const invBufferTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  // Reset refs on open; clear buffer timer on close
+  useEffect(() => {
+    if (showBarcodeScanner) {
+      invCooldownRef.current = false;
+      invLastScanned.current = '';
+      invScanBufferRef.current.clear();
+    } else {
+      if (invBufferTimerRef.current) {
+        clearTimeout(invBufferTimerRef.current);
+        invBufferTimerRef.current = null;
+      }
+    }
+  }, [showBarcodeScanner]);
+
+  const handleInvBarcodeScan = ({ data, type }: { type: string; data: string }) => {
+    if (invCooldownRef.current) return;
+
+    const isNumeric = /^\d+$/.test(data);
+    if (isNumeric && data.length < 8) return;
+
+    const isPrimary = type === 'ean13' || type === 'upc_a'
+      || (isNumeric && data.length === 13)
+      || (isNumeric && data.length === 12);
+
+    if (isPrimary) {
+      if (data === invLastScanned.current) return;
+      invCooldownRef.current = true;
+      invLastScanned.current = data;
+      if (invBufferTimerRef.current) { clearTimeout(invBufferTimerRef.current); invBufferTimerRef.current = null; }
+      invScanBufferRef.current.clear();
+      setBarcode(data);
+      setShowBarcodeScanner(false);
+      return;
+    }
+
+    // Shorter formats (EAN-8, Code128, etc.) — require 2+ consistent reads in 600ms
+    const count = (invScanBufferRef.current.get(data) ?? 0) + 1;
+    invScanBufferRef.current.set(data, count);
+
+    if (invBufferTimerRef.current) clearTimeout(invBufferTimerRef.current);
+    invBufferTimerRef.current = setTimeout(() => {
+      invBufferTimerRef.current = null;
+      if (invCooldownRef.current) { invScanBufferRef.current.clear(); return; }
+
+      let bestCode = '';
+      let bestCount = 0;
+      invScanBufferRef.current.forEach((c, code) => {
+        if (c > bestCount) { bestCount = c; bestCode = code; }
+      });
+      invScanBufferRef.current.clear();
+
+      if (bestCode && bestCount >= 2 && bestCode !== invLastScanned.current) {
+        invCooldownRef.current = true;
+        invLastScanned.current = bestCode;
+        setBarcode(bestCode);
+        setShowBarcodeScanner(false);
+      }
+    }, 600);
+  };
+
   const categories = shopType === 'cosmetics' ? COSMETICS_CATEGORIES
     : shopType === 'imported' ? IMPORTED_CATEGORIES
     : GROCERY_CATEGORIES;
@@ -494,10 +570,10 @@ function ProductModal({ visible, product, shopId, shopType, shopDefaultDiscount,
 
           {/* Name */}
           {isCosmetics ? (
-            <Field label="Product Name *" value={nameEn} onChangeText={setNameEn} placeholder="e.g. Vaseline Body Lotion 400ML" />
+            <Field label="Product Name *" value={nameEn} onChangeText={setNameEn} placeholder="e.g. Vaseline Body Lotion 400ML" voiceDictation />
           ) : (
             <>
-              <Field label="পণ্যের নাম (বাংলা) *" value={name} onChangeText={setName} placeholder="যেমন: চাল" />
+              <Field label="পণ্যের নাম (বাংলা) *" value={name} onChangeText={setName} placeholder="যেমন: চাল" voiceDictation />
               <Field label="ইংরেজি নাম" value={nameEn} onChangeText={setNameEn} placeholder="Rice" />
             </>
           )}
@@ -639,10 +715,7 @@ function ProductModal({ visible, product, shopId, shopType, shopDefaultDiscount,
                 <CameraView
                   style={StyleSheet.absoluteFillObject}
                   facing="back"
-                  onBarcodeScanned={({ data }) => {
-                    setBarcode(data);
-                    setShowBarcodeScanner(false);
-                  }}
+                  onBarcodeScanned={handleInvBarcodeScan}
                   barcodeScannerSettings={{ barcodeTypes: ['ean13', 'ean8', 'upc_a', 'upc_e', 'code128'] }}
                 />
               )}
@@ -1748,22 +1821,37 @@ function DamageLossModal({ visible, product, isCosmetics, onClose, onSaved }: an
 }
 
 // ── Reusable field component ──
-function Field({ label, value, onChangeText, placeholder, numeric }: {
+function Field({ label, value, onChangeText, placeholder, numeric, voiceDictation }: {
   label: string; value: string;
   onChangeText: (t: string) => void;
   placeholder?: string; numeric?: boolean;
+  /** Adds a mic button that dictates straight into this field — see VoiceDictationButton. */
+  voiceDictation?: boolean;
 }) {
   return (
     <View style={{ gap: 6 }}>
       <Text style={styles.fieldLabel}>{label}</Text>
-      <TextInput
-        style={styles.modalInput}
-        value={value}
-        onChangeText={onChangeText}
-        placeholder={placeholder}
-        placeholderTextColor={COLORS.textMuted}
-        keyboardType={numeric ? 'numeric' : 'default'}
-      />
+      {voiceDictation ? (
+        <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
+          <TextInput
+            style={[styles.modalInput, { flex: 1 }]}
+            value={value}
+            onChangeText={onChangeText}
+            placeholder={placeholder}
+            placeholderTextColor={COLORS.textMuted}
+          />
+          <VoiceDictationButton onResult={onChangeText} />
+        </View>
+      ) : (
+        <TextInput
+          style={styles.modalInput}
+          value={value}
+          onChangeText={onChangeText}
+          placeholder={placeholder}
+          placeholderTextColor={COLORS.textMuted}
+          keyboardType={numeric ? 'numeric' : 'default'}
+        />
+      )}
     </View>
   );
 }

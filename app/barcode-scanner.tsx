@@ -14,6 +14,7 @@ import { productApi } from '@/services/api/productApi';
 import { ApiError, OfflineError } from '@/services/api/client';
 import { GlobalProduct } from '@/types';
 import { v4 as uuidv4 } from 'uuid';
+import VoiceDictationButton from '@/components/pos/VoiceDictationButton';
 
 // Categories based on shop type
 const GROCERY_CATEGORIES = [
@@ -88,6 +89,11 @@ export default function BarcodeScannerScreen() {
   const [productCountry, setProductCountry] = useState('');
   const [showCountryPicker, setShowCountryPicker] = useState(false);
 
+  // Items scanned this session, accumulated across multiple scans — the
+  // scanner stays open after each add (see handleAddToBill) instead of
+  // closing per item, so a full basket can be scanned in one pass.
+  const [scannedSession, setScannedSession] = useState<any[]>([]);
+
   const cooldownRef = useRef<boolean>(false);
   const lastScanned = useRef<string>('');
   // Buffer for non-EAN13 reads: barcode → consecutive hit count
@@ -97,7 +103,12 @@ export default function BarcodeScannerScreen() {
   useEffect(() => {
     requestPermission();
     // Always do a fresh product fetch when the scanner opens so the cache reflects current DB state
-    productApi.listAll().then(setProducts).catch(() => {});
+    productApi.listAll()
+      .then(list => {
+        setProducts(list);
+        console.log('[Scanner] listAll loaded:', list.length, 'products,', list.filter((p: any) => p.barcode).length, 'with barcodes');
+      })
+      .catch(err => console.error('[Scanner] listAll failed:', err));
   }, []);
 
   const requestPermission = async () => {
@@ -140,10 +151,12 @@ export default function BarcodeScannerScreen() {
         return;
       }
 
-      // Step 2: backend barcode API
+      // Step 2: backend barcode API (online verification required before new product entry)
       let apiFound = false;
+      let verifiedOnline = false;
       try {
         const res = await productApi.barcodeLookup(data);
+        verifiedOnline = true; // Got a clean server response
         if (res?.product) {
           const p = res.product;
           setProducts([...liveProducts, p as any]);
@@ -183,6 +196,7 @@ export default function BarcodeScannerScreen() {
         if (apiErr instanceof ApiError) {
           if (apiErr.status === 404) {
             console.log('[Barcode Lookup] Not in backend:', data);
+            verifiedOnline = true; // Definitive 404 = confirmed not in DB
           } else {
             console.error('[Barcode Lookup] API error:', apiErr.status, JSON.stringify(apiErr.details ?? apiErr.message));
           }
@@ -195,9 +209,8 @@ export default function BarcodeScannerScreen() {
 
       if (apiFound) return;
 
-      // Step 3: background product list might be stale — try a targeted backend search
-      // as a last resort before declaring the product truly absent.
-      if (shop?.id) {
+      // Step 3: search fallback — only if barcodeLookup had a non-404 server error
+      if (!verifiedOnline && shop?.id) {
         try {
           const searchResults = await productApi.search(data);
           const exactMatch = searchResults.find(p => (p as any).barcode === data);
@@ -218,6 +231,7 @@ export default function BarcodeScannerScreen() {
             setProductModalVisible(true);
             return;
           }
+          verifiedOnline = true; // Search succeeded with no match — confirmed online
         } catch (searchErr) {
           if (!(searchErr instanceof OfflineError)) {
             console.warn('[Scan] Search fallback error:', searchErr);
@@ -225,7 +239,24 @@ export default function BarcodeScannerScreen() {
         }
       }
 
-      // All sources exhausted — product truly not found
+      // Block new product entry if we couldn't verify online
+      if (!verifiedOnline) {
+        Alert.alert(
+          'ইন্টারনেট প্রয়োজন',
+          'নতুন পণ্য যোগ করতে ইন্টারনেট সংযোগ প্রয়োজন।\nঅনুগ্রহ করে ইন্টারনেট চেক করে আবার স্ক্যান করুন।',
+          [{
+            text: 'ঠিক আছে',
+            onPress: () => {
+              setScanning(true);
+              cooldownRef.current = false;
+              lastScanned.current = '';
+            },
+          }]
+        );
+        return;
+      }
+
+      // All sources exhausted + verified online — product truly not found
       setNotFoundBarcode(data);
       setProductCategory(isCosmetics ? 'Skin Care' : 'other');
       setNewProductModal(true);
@@ -329,8 +360,22 @@ export default function BarcodeScannerScreen() {
       checked: true,
       confidence: 1.0,
     };
+    // Accumulate and keep scanning — a shopkeeper ringing up a full basket
+    // scans item after item without the screen closing on them each time.
+    // Closing (and handing the whole batch back to the bill) is an explicit
+    // action via the ✕ button below.
+    setScannedSession(prev => [...prev, item]);
+    Vibration.vibrate(60);
+    resumeScanning();
+  };
+
+  const finishScanning = () => {
+    // Matches the existing back()-then-setParams() order this screen already
+    // used for a single item, now carrying the whole accumulated batch.
     router.back();
-    router.setParams({ scannedItem: JSON.stringify(item) });
+    if (scannedSession.length > 0) {
+      router.setParams({ scannedItem: JSON.stringify(scannedSession) });
+    }
   };
 
   const handleSaveNewProduct = async () => {
@@ -381,13 +426,9 @@ export default function BarcodeScannerScreen() {
         }
       } catch (dupErr) {
         if (dupErr instanceof OfflineError) {
-          // Offline — check live store for duplicate
-          const localDup = useProductStore.getState().products.find(p => (p as any).barcode === notFoundBarcode);
-          if (localDup) {
-            setLoading(false);
-            Alert.alert('সতর্কতা', 'এই বারকোড দিয়ে পণ্য আগে থেকেই আছে।');
-            return;
-          }
+          setLoading(false);
+          Alert.alert('ইন্টারনেট প্রয়োজন', 'নতুন পণ্য যোগ করতে ইন্টারনেট সংযোগ প্রয়োজন।');
+          return;
         }
         // ApiError 404 = no duplicate found; other errors = proceed with create
       }
@@ -440,6 +481,7 @@ export default function BarcodeScannerScreen() {
       try {
         const created = await productApi.create(createPayload);
         finalId = created.id;
+        console.log('[Product Create] success — id:', created.id, 'barcode from API:', (created as any).barcode ?? 'MISSING');
         const afterCreate = useProductStore.getState().products;
         setProducts(afterCreate.map((p: any) => p.id === localId ? created : p));
       } catch (createErr: any) {
@@ -458,11 +500,20 @@ export default function BarcodeScannerScreen() {
           Alert.alert('ত্রুটি', alertMsg);
           return;
         }
-        // OfflineError or unknown — keep the local record
-        console.warn('[Product Create] Offline or unknown error — saved locally only', createErr);
+        if (createErr instanceof OfflineError) {
+          // Roll back optimistic entry — offline creation not allowed for new barcoded products
+          const afterFail = useProductStore.getState().products;
+          setProducts(afterFail.filter((p: any) => p.id !== localId));
+          Alert.alert('ইন্টারনেট প্রয়োজন', 'নতুন পণ্য যোগ করতে ইন্টারনেট সংযোগ প্রয়োজন।');
+          return;
+        }
+        // Unknown error — keep the local record
+        console.warn('[Product Create] Unknown error — saved locally only', createErr);
       }
 
-      // Add to bill
+      // Add to bill — same accumulate-and-keep-scanning behavior as a normal
+      // barcode hit (handleAddToBill above), so registering an unlabeled item
+      // mid-basket doesn't close the scanner on the shopkeeper.
       const item = {
         product_name: newProductName,
         product_id: finalId,
@@ -476,8 +527,8 @@ export default function BarcodeScannerScreen() {
 
       setNewProductModal(false);
       resetForm();
-      router.back();
-      router.setParams({ scannedItem: JSON.stringify(item) });
+      setScannedSession(prev => [...prev, item]);
+      resumeScanning();
 
     } catch (e: any) {
       Alert.alert('ত্রুটি', e.message);
@@ -556,10 +607,15 @@ export default function BarcodeScannerScreen() {
 
       {/* Top bar */}
       <SafeAreaView style={styles.topBar} edges={['top']}>
-        <TouchableOpacity style={styles.topBtn} onPress={() => router.back()}>
+        <TouchableOpacity style={styles.topBtn} onPress={finishScanning}>
           <Ionicons name="close" size={24} color="#fff" />
         </TouchableOpacity>
-        <Text style={styles.topTitle}>বারকোড স্ক্যান করুন</Text>
+        <View style={{ alignItems: 'center' }}>
+          <Text style={styles.topTitle}>বারকোড স্ক্যান করুন</Text>
+          {scannedSession.length > 0 && (
+            <Text style={styles.scanCountTxt}>{scannedSession.length}টি স্ক্যান করা হয়েছে</Text>
+          )}
+        </View>
         <TouchableOpacity style={styles.topBtn} onPress={() => setTorch(!torch)}>
           <Ionicons name={torch ? 'flash' : 'flash-outline'} size={24} color="#fff" />
         </TouchableOpacity>
@@ -687,14 +743,17 @@ export default function BarcodeScannerScreen() {
 
             <View style={styles.fieldGroup}>
               <Text style={styles.fieldLabel}>পণ্যের নাম *</Text>
-              <TextInput
-                style={styles.input}
-                value={newProductName}
-                onChangeText={setNewProductName}
-                placeholder="যেমন: Vaseline Body Lotion 400ML"
-                placeholderTextColor={COLORS.textMuted}
-                autoFocus
-              />
+              <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
+                <TextInput
+                  style={[styles.input, { flex: 1 }]}
+                  value={newProductName}
+                  onChangeText={setNewProductName}
+                  placeholder="যেমন: Vaseline Body Lotion 400ML"
+                  placeholderTextColor={COLORS.textMuted}
+                  autoFocus
+                />
+                <VoiceDictationButton onResult={setNewProductName} />
+              </View>
             </View>
 
             {isCosmetics && (
@@ -932,6 +991,7 @@ const styles = StyleSheet.create({
   topBar: { position: 'absolute', top: 0, left: 0, right: 0, flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', paddingHorizontal: 16, paddingBottom: 12 },
   topBtn: { width: 40, height: 40, borderRadius: 20, backgroundColor: 'rgba(0,0,0,0.5)', alignItems: 'center', justifyContent: 'center' },
   topTitle: { fontSize: FONT_SIZES.md, fontWeight: '700', color: '#fff' },
+  scanCountTxt: { fontSize: FONT_SIZES.xs, fontWeight: '600', color: COLORS.primaryLighter, marginTop: 1 },
   modalHeader: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', padding: 20, borderBottomWidth: 0.5, borderBottomColor: COLORS.border },
   modalTitle: { fontSize: FONT_SIZES.lg, fontWeight: '700', color: COLORS.text },
   productCard: { backgroundColor: '#F0FFF4', borderRadius: 12, padding: 16, borderWidth: 1, borderColor: COLORS.sale },

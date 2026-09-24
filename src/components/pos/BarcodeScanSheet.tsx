@@ -31,7 +31,7 @@ type Added = { key: number; name: string; price: number; outOfStock: boolean };
 
 /**
  * The scanner as an overlay on /pos (PRD FR-7–FR-9, design system's
- * BarcodeScanFAB sheet). It is a Modal over the mounted POS screen, not a
+ * scan sheet). It is a Modal over the mounted POS screen, not a
  * route, so the customer tabs and carts underneath are never touched; every
  * successful scan goes straight into the active customer's cart and the camera
  * stays live for the next item.

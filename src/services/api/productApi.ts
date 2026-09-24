@@ -36,7 +36,9 @@ export interface BulkImportResult {
   errors?: { row: number; message: string }[];
 }
 
-const PAGE_SIZE = 200; // matches the backend's internal cap per page
+// The backend allows up to 2000 per page. One big page (not many small ones) matters: it orders by created_at, and rows
+// that share a timestamp come back in an unstable order between pages -> duplicated and missing products.
+const PAGE_SIZE = 1000;
 
 export const productApi = {
   /** Fetch a single page (low-level). Prefer listAll() for most callers. */
@@ -51,7 +53,10 @@ export const productApi = {
     while (page <= 50) { // safety cap: 50 × 200 = 10 000 products max
       const batch = await apiRequest<Product[]>('GET', `/products?page=${page}&limit=${PAGE_SIZE}`);
       if (!Array.isArray(batch) || batch.length === 0) break;
-      all.push(...batch);
+      const seen = new Set(all.map(p => p.id));
+      const fresh = batch.filter(p => !seen.has(p.id)); // never show the same product twice
+      if (fresh.length === 0) break;                    // server repeated a page we already have
+      all.push(...fresh);
       if (batch.length < PAGE_SIZE) break; // last page — got fewer than a full batch
       page++;
     }

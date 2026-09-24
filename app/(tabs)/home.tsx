@@ -26,7 +26,6 @@ import { useCartStore, CartItem } from '@/store';
 import { useCatalog } from '@/hooks/useCatalog';
 import CategoryChipRail, { RailCategory } from '@/components/pos/CategoryChipRail';
 import ProductBrowseList from '@/components/pos/ProductBrowseList';
-import BarcodeScanFAB from '@/components/pos/BarcodeScanFAB';
 import BarcodeScanSheet from '@/components/pos/BarcodeScanSheet';
 import LooseQuantitySheet from '@/components/pos/LooseQuantitySheet';
 import { isLoose, formatWeight } from '@/utils/looseUnits';
@@ -470,8 +469,7 @@ useEffect(() => {
         onAddMore={() => setTextModalVisible(true)}
       />
 
-      {/* Scan: floating button + an overlay on this screen (not a route), so the customer tabs stay mounted underneath */}
-      <BarcodeScanFAB raised={activeCart.items.length > 0} onPress={() => setScanVisible(true)} />
+      {/* Scan: opened from the icon in the search bar; an overlay on this screen (not a route), so the customer tabs stay mounted underneath */}
       <BarcodeScanSheet
         visible={scanVisible}
         onClose={() => setScanVisible(false)}

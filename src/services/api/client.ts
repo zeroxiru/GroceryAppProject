@@ -73,7 +73,10 @@ function refreshAccessToken(): Promise<RefreshOutcome> {
 
 async function doRefresh(): Promise<RefreshOutcome> {
   const refreshToken = await tokenStore.getRefresh();
-  if (!refreshToken) return { ok: false, reason: 'invalid' };
+  if (!refreshToken) {
+    console.warn('[Auth] no refresh token stored — cannot renew the session');
+    return { ok: false, reason: 'invalid' };
+  }
 
   let res: Response;
   try {
@@ -83,10 +86,14 @@ async function doRefresh(): Promise<RefreshOutcome> {
       body: JSON.stringify({ refreshToken }),
     });
   } catch {
+    console.warn('[Auth] token refresh could not reach the server — keeping the session');
     return { ok: false, reason: 'offline' };
   }
 
-  if (!res.ok) return { ok: false, reason: 'invalid' };
+  if (!res.ok) {
+    console.warn(`[Auth] refresh token rejected by the server (HTTP ${res.status})`);
+    return { ok: false, reason: 'invalid' };
+  }
 
   const json = await res.json();
   const data = json?.data ?? json;
@@ -121,6 +128,7 @@ export async function apiRequest<T>(
     if (outcome.ok) return apiRequest<T>(method, path, body, false);
     if (outcome.reason === 'offline') throw new OfflineError();
     // reason === 'invalid': the session is genuinely over.
+    console.warn(`[Auth] session expired on ${method} ${path} — signing out`);
     await tokenStore.clear();
     sessionExpiredListener?.();
     throw new ApiError(401, 'Session expired');

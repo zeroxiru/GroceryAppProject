@@ -35,12 +35,22 @@ export const productService = {
     }
   },
 
+  /**
+   * `localOnly: true` on the result means the server never saw this product
+   * (offline). Its id is a made-up local one, so a bill containing it would be
+   * refused at checkout — callers that are about to sell it should not.
+   */
   async addNewProduct(params: {
     name_bangla: string;
     unit: string;
     sale_price: number;
     purchase_price?: number;
-  }): Promise<Product> {
+    barcode?: string;
+    name_english?: string;
+    brand?: string;
+    mrp?: number;
+    origin_country?: string;
+  }): Promise<Product & { localOnly?: boolean }> {
     const { shop } = useAuthStore.getState();
     if (!shop) throw new Error('Not authenticated');
 
@@ -48,7 +58,7 @@ export const productService = {
       id: uuidv4(),
       shop_id: shop.id,
       name_bangla: params.name_bangla,
-      name_english: '',
+      name_english: params.name_english ?? '',
       aliases: [],
       unit: params.unit as any,
       category: 'other',
@@ -57,6 +67,10 @@ export const productService = {
       current_stock: 0,
       min_stock_alert: 0,
       is_active: true,
+      barcode: params.barcode,
+      brand: params.brand,
+      mrp: params.mrp,
+      origin_country: params.origin_country,
       updated_at: new Date().toISOString(),
     };
 
@@ -68,7 +82,7 @@ export const productService = {
       const created = await productApi.create({
         shop_id: shop.id,
         name_bangla: params.name_bangla,
-        name_english: '',
+        name_english: params.name_english ?? '',
         aliases: [],
         unit: params.unit as any,
         category: 'other',
@@ -77,6 +91,10 @@ export const productService = {
         current_stock: 0,
         min_stock_alert: 0,
         is_active: true,
+        barcode: params.barcode,
+        brand: params.brand,
+        mrp: params.mrp,
+        origin_country: params.origin_country,
       });
       // Replace optimistic record with server record
       const updated = useProductStore.getState().products.map(p =>
@@ -87,7 +105,7 @@ export const productService = {
     } catch (e) {
       if (e instanceof OfflineError) {
         console.warn('Offline — product saved locally only');
-        return optimistic;
+        return { ...optimistic, localOnly: true };
       }
       throw e;
     }

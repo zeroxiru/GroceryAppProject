@@ -24,11 +24,10 @@ import QueueTabs from '@/components/pos/QueueTabs';
 import CartBillBar, { PAYMENT_METHODS } from '@/components/pos/CartBillBar';
 import { useCartStore, CartItem } from '@/store';
 import { useCatalog } from '@/hooks/useCatalog';
-import CategoryChipRail, { RailCategory } from '@/components/pos/CategoryChipRail';
+import CategoryChipRail, { RailCategory, RailBrand } from '@/components/pos/CategoryChipRail';
 import ProductBrowseList from '@/components/pos/ProductBrowseList';
 import BarcodeScanSheet from '@/components/pos/BarcodeScanSheet';
 import LooseQuantitySheet from '@/components/pos/LooseQuantitySheet';
-import BrandChipRail, { BrandChip } from '@/components/pos/BrandChipRail';
 import { useSalesStatsStore } from '@/store/salesStats';
 import DropdownSelect from '@/components/common/DropdownSelect';
 import { unitOptions } from '@/constants/unitOptions';
@@ -303,11 +302,10 @@ useEffect(() => {
   // Shown only when the category has two or more brands; changing category clears it.
   const [selectedBrand, setSelectedBrand] = useState<string | null>(null);
   useEffect(() => { setSelectedBrand(null); }, [selectedCategory]);
-  const brandChips = React.useMemo<BrandChip[]>(() => {
-    if (!selectedCategory) return [];
-    const m = new Map<string, BrandChip>();
+  const brandChips = React.useMemo<RailBrand[]>(() => {
+    const m = new Map<string, RailBrand>();
     for (const p of activeProducts) {
-      if (p.category !== selectedCategory) continue;
+      if (selectedCategory && p.category !== selectedCategory) continue;
       const b = (p.brand ?? '').trim();
       if (!b) continue;
       const key = b.toLowerCase();
@@ -315,7 +313,7 @@ useEffect(() => {
       if (cur) cur.count++; else m.set(key, { key, label: b, count: 1 });
     }
     const list = [...m.values()].sort((a, b) => b.count - a.count || a.label.localeCompare(b.label));
-    return list.length >= 2 ? list.slice(0, 24) : [];
+    return list.length >= 2 ? list : [];
   }, [activeProducts, selectedCategory]);
 
   // Anything sold today floats to the top of the list.
@@ -484,8 +482,10 @@ useEffect(() => {
           selected={selectedCategory}
           onSelect={setSelectedCategory}
           totalCount={activeProducts.length}
+          brands={brandChips}
+          selectedBrand={selectedBrand}
+          onSelectBrand={setSelectedBrand}
         />
-        <BrandChipRail brands={brandChips} selected={selectedBrand} onSelect={setSelectedBrand} />
         <ProductBrowseList
           products={activeProducts}
           category={selectedCategory}

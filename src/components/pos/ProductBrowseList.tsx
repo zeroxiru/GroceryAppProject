@@ -39,7 +39,7 @@ export default function ProductBrowseList({ products, category, brand = null, sa
 
   const rows = useMemo(() => {
     let list = category ? products.filter(p => p.category === category) : products;
-    if (category && brand) list = list.filter(p => (p.brand ?? '').trim().toLowerCase() === brand);
+    if (brand) list = list.filter(p => (p.brand ?? '').trim().toLowerCase() === brand);
     return [...list].sort((a, b) => {
       const sa = salesCount[a.id] ?? 0;
       const sb = salesCount[b.id] ?? 0;

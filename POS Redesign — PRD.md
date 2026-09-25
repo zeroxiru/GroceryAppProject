@@ -1,6 +1,6 @@
 # DokanAI Mobile — POS Screen Redesign PRD
 
-**Status:** Draft for review
+**Status:** In build — most of the PRD is implemented on branch `pos-redesign`; see [§13 Implementation Status](#13-implementation-status-2026-09-25) for what is done, what is verified, and what is left.
 **Owner:** Ibrahim Rahamathullah
 **Scope:** `DokanAI` mobile app (Expo/React Native) only. **Backend is frozen** — this PRD proposes zero backend/schema changes unless explicitly marked ⚠️ in [§9](#9-api-surface--what-already-exists).
 **Reference evidence:** `../Requirements/GroceryShopsRequirment/*.jpeg` (12 shop-floor photos), `../Requirements/posScreenDisplay1.png`, `posScreenDisplay2.png` (current app), `../Requirements/AppSessionError.png` (session bug), `../Requirements/WhatsApp Image 2026-09-22 at 00.41.0*.jpeg` (handwritten khata ledger pages).
@@ -228,12 +228,95 @@ If, during implementation, something in this PRD turns out to genuinely need a n
 
 ## 12. Open Questions — need your decision before/while building
 
-1. **Held-cart limit:** how many concurrent parked bills should the app support (FR-12)? Recommend starting at 5.
-2. **Generated barcode format:** confirm the internal Code128 payload scheme, e.g. `DKN{shop_short_id}{5-digit product seq}` — needs to be short enough to print legibly on a small label and not collide with real EAN/UPC codes.
-3. **Label media:** what will you actually print on — a thermal label roll (common cheap 50×30mm printer), or A4 sticker sheets on a regular printer? This decides the `expo-print` layout in Phase 3.
-4. **"Frequent items" window:** 30-day sale count assumed for FR-4/FR-6 tiebreak — confirm or adjust.
+1. **Held-cart limit:** how many concurrent parked bills should the app support (FR-12)? Recommend starting at 5. *(Built with 6; still open — confirm 5 or 6.)*
+2. **Generated barcode format:** ✅ **Decided by the backend:** `DKN-` + first 4 characters of the shop id + a 6-digit per-shop counter (e.g. `DKN-4CB9-000080`), Code128. Verified printing at 50 × 30 mm and decoding.
+3. **Label media:** ✅ **Thermal label roll, Gprinter GP-3120TUC**, printed from the **web POS** (Products → Labels), not from the phone. Roll size still to confirm (50 × 30 mm assumed; 60 × 40 mm also offered).
+4. **"Frequent items" window:** ✅ **30 days, built** (FR-4).
 5. **Custom/loose one-off items (FR-19):** should these appear anywhere in Reports (as an "other/loose" bucket) or stay purely bill-line items with no inventory linkage at all?
-6. **Parallel design work:** you mentioned Claude-design has already started on this — should Phase 1's implementation wait for that visual output, or proceed against §7's textual IA now and reconcile visuals in Phase 4?
+6. **Parallel design work:** ✅ **Proceeded against the design system ("Daily Bazar POS" artifact)**; visuals reconciled during the build.
+
+
+---
+
+## 13. Implementation Status (2026-09-25)
+
+Legend: ✅ built **and** seen working on a real phone (Samsung A16) · 🟡 built, not yet proven on the phone · ❌ not built · ➖ decided out of scope.
+Code: branch `pos-redesign` (mobile app) and `main` of `dokanai-platform` (web POS label page). Backend: **no changes** (frozen), as required.
+
+### 13.1 Requirement by requirement
+
+| FR | Requirement | Status | Notes |
+|---|---|---|---|
+| FR-1 | Persistent search bar, not a modal | ✅ | The old text modal remains only behind the bill's "add more" action. |
+| FR-2 | Instant, per-keystroke local search on a shared index | ✅ | One Fuse.js index (`productSearch.ts`) used by search and NLU. The "< 100 ms per keystroke" target is **not measured**. |
+| FR-3 | Typo- and dialect-tolerant Bangla search | ✅ | Built as `searchNormalize.ts`: product-word spellings (চাউল→চাল, মুসুর→মসুর, সইরষা→সরিষা …) and Bangla/Latin digits both ways. Direct matches keep their rank; variants only append. `nluService.normalizeDialect` was deliberately **not** reused — it rewrites verbs and quantities, which would add noise to a product search. |
+| FR-4 | Empty state: categories + recent + frequent | ✅ | "জনপ্রিয়" and "সাম্প্রতিক" use the **last 30 days** of sales (persisted, refreshed at most hourly, updated after each checkout, cleared on shop switch). Works offline. |
+| FR-5 | Category filters the full product list | ✅ | The 12 approved grocery categories in fixed shelf order with Bangla names; 5 chips then "+ আরও (n)". **Brand filter inside a category** added (chips appear when the category has ≥ 2 brands). |
+| FR-6 | Result row: name, price, stock, one big "+" | ✅ | Loose items show price per kg and stock in kg with a "পরিমাণ দিন" button instead of "+". |
+| FR-7 | Scan icon in the search bar; camera as an overlay | ✅ | Overlay over the POS (customer tabs stay mounted). The separate floating scan button was removed as a duplicate. |
+| FR-8 | Haptic + sound; sheet stays open; next scan | 🟡 | Haptic, stay-open and running tally ✅. **Beep built, not yet confirmed audible on the device.** Real-pack scans verified (Coca-Cola, Ifad Pillow Chips). |
+| FR-9 | Unknown barcode → create product | ✅ | Plus, beyond the PRD: **attach the scanned barcode to a product the shop already has** (search by name → confirm), so a pack whose stored barcode was wrong does not create a duplicate. |
+| FR-10 | Local cart store, persisted | ✅ | `useCartStore`; carts survive an app restart. Cart limit is **6** (PRD suggested 5 — open). |
+| FR-11 | Hold the current cart, start a new customer | ✅ | Implemented as customer tabs rather than a "Hold" button. |
+| FR-12 | Strip of held carts; switch; merge | ✅ | Customer tabs with totals; long-press menu: rename / **merge into another customer** (same product becomes one summed line) / close. Merge verified: 1 + (2 + 1 Kinle) → 3 Coca-Cola + 1 Kinle = ৳275. Numbers in Bangla digits. |
+| FR-13 | Carts persist and are independent of auth | 🟡 | Persisted ✅. **Session expiry with an open cart not tested end-to-end** (see FR-20). |
+| FR-14 | "Generate barcode" for products without one | ✅ | On the **web** Labels page and the backend endpoint; not a per-product button in the phone's Inventory. |
+| FR-15 | Internal Code128 barcode format | ✅ | `DKN-<shop4>-<6 digits>`; decodes at 2 printer dots per bar. |
+| FR-16 | Print labels | 🟡 | **Built on the web POS** for the GP-3120TUC (one label per page, 50 × 30 / 60 × 40 mm). Print output verified as PDF and decoded; **not yet printed on the real printer**. The PRD's phone-side `expo-print` version is ❌ not built (decided not needed). |
+| FR-17 | Bulk generate + print | 🟡 | "Add all loose items" + "Generate missing barcodes" on the web Labels page. The page lists **only** loose items and products without a barcode or with an own `DKN-` barcode — never products carrying a manufacturer barcode. |
+| FR-18 | Labelled item behaves like any barcoded item | 🟡 | Manufacturer-barcode scans ✅; **a printed loose label scanned back is untested.** A scanned loose item opens the weight sheet. |
+| FR-19 | Custom one-off item (type an amount) | 🟡 | Built. **Never sold through a real checkout** on the server. |
+| FR-20 | No cart lost to a session error | 🟡 | Refresh-token race fixed, redirect on expiry implemented. **The acceptance test (force a 401 mid-bill) was not run**; the exact cause of the original logout is unproven. |
+
+### 13.2 Added beyond the PRD (decided during the build)
+
+| Area | What | Why |
+|---|---|---|
+| **Loose items** | Stored the platform way: unit `gram`, price **per gram**, stock **in grams** (migration 012, same as the web POS). Kilograms are display only. | Stock deduction is by the sold quantity in the row's own unit; mixing kg and grams over-deducts. |
+| | **Weight / amount sheet** ("ওজন দিয়ে" / "টাকা দিয়ে"): quick chips, stock guard, refuses rows not stored in grams. Also opens from search and from a scan. | Matches the web POS dialog; both seller and customer think in weight or taka. |
+| | **Whole-taka billing** for loose lines; the +/− stepper moves 100 g and re-prices to a whole taka. | Bill total equals the sum of its lines. |
+| **Shop isolation** | Logging into a different shop clears carts, cached products, categories, today's bills and sales stats; unsynced bills are **parked per shop**, not deleted. | An old bill referencing another shop's products could never sync. |
+| **History / totals** | History and "আজ ৳" now use `/billing/range` (the route the web POS uses), adapt server bills to rows, and group by the **local** calendar day. | The old routes/shape no longer existed; UTC days put early-morning sales on the previous day. |
+| **Add-product form** | Unit and category are **dropdowns** (full list); category list is the 12 approved only; mic on Bangla name, English name, brand, size (dictation appends, field stays editable); English name and brand are Title-Cased. | Chips hid options; shopkeepers type slowly. |
+| **Loading** | All products in one request with de-duplication by id. | The API orders by `created_at`; ties reorder between pages, so products were duplicated/missing. |
+
+### 13.3 Decisions that changed the PRD
+
+- **Voice on `/pos` was removed** (the PRD's search bar sketch still shows a 🎙). Dictation lives only in the product-entry fields.
+- **Split payment: out of scope** for now (needs a backend change; approved but not built).
+- **Labels are printed from the web POS**, not from the phone (`expo-print` version not built).
+- **Manufacturer barcodes are never overwritten by generated ones.** Any barcode that failed its check digit, was shared by different products, was junk, or came from another shop's `DKN-` range was replaced by a fresh `DKN-` barcode during the catalogue load; the original is kept in the product's description.
+
+### 13.4 Data (Jabir General Store, shop `4cb9e7c0-30e6-4d2c-8860-e5c1070285c3`)
+
+- 631-row Daily Bazar export → 35 marketplace rows and 10 exact duplicates removed → **548 loaded** in the 12 approved categories, **+14 loose staples/pieces** = 562 (563 with one product added by hand). 39 rows held back (33 same-name-unknown-brand, 4 price 0, 1 duplicate cashew, 1 unknown name).
+- **Stock is sample stock** (20 per packaged item, 25 kg per loose item, tagged `DEMO-STOCK`), not the shop's inventory. Staple prices are sample prices.
+- Full detail: `ProductCleanup/Product Cleanup Report.md` and `ProductCleanup/New Shop Product Load — PRD.md`.
+
+### 13.5 What is left
+
+**A. Prove what is built (no code):**
+1. A printed loose label scanned back (FR-16, FR-18) — needs the real GP-3120TUC and roll size.
+2. A custom one-off item through a real checkout (FR-19).
+3. Force a session error mid-bill; confirm the cart survives (FR-13, FR-20).
+4. Sell offline, reconnect, confirm it syncs once (offline-first NFR).
+5. Confirm the scan beep is audible (FR-8).
+6. Measure search latency on a low-end device (§10).
+
+**B. Small builds:** none outstanding from the FR list.
+
+**C. Optional / not built:** phone-side label printing (FR-16, decided unnecessary) · time-to-first-item timing (Phase 4, §11 metric 1) · a "Generate barcode" button per product in the phone's Inventory (FR-14 is covered by the web page).
+
+**D. Decisions needed:** held-cart limit 5 or 6 · whether custom items appear in Reports (Q5) · label roll size (Q3).
+
+### 13.6 Acceptance test results so far
+
+| PRD test | Result |
+|---|---|
+| Find and add a known product by Bangla search / English search / barcode scan | ✅ all three seen working (timing not measured) |
+| Start bill A, hold, start and complete bill B, switch back | 🟡 two tabs and merge verified; **completing bill B while A is held** and the restart in between not re-run |
+| Generate a label, print it, scan it back, correct product added | 🟡 label generated and print output decoded; **physical print + scan-back pending** |
+| Force a 401 mid-bill, draft intact after re-login | ❌ not run |
 
 ---
 

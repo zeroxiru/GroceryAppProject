@@ -15,6 +15,7 @@ import { useProductStore } from '@/store';
 import { barcodeService } from '@/services/barcode/barcodeService';
 import { productService } from '@/services/supabase/productService';
 import { productApi } from '@/services/api/productApi';
+import { INTERNAL_BARCODE } from '@/services/barcode/barcodeIndex';
 import { playScanBeep, preloadScanBeep } from '@/utils/scanBeep';
 import { ProductSearchIndex } from '@/services/search/productSearch';
 import { POS } from '@/constants/posTokens';
@@ -32,7 +33,7 @@ const FRAME_W = 280;
 const FRAME_H = 170;
 const UNITS: Unit[] = ['piece', 'kg', 'gram', 'litre', 'ml', 'dozen', 'packet'];
 
-type Unknown = { code: string; global: GlobalProduct | null };
+type Unknown = { code: string; global: GlobalProduct | null; networkIssue?: boolean };
 type Added = { key: number; name: string; price: number; outOfStock: boolean };
 
 /**
@@ -114,18 +115,23 @@ export default function BarcodeScanSheet({ visible, onClose, onAdd }: Props) {
   };
 
   const processCode = async (code: string) => {
+    // The phone already holds the whole product list: answer from it immediately — no spinner, no waiting, and the camera
+    // keeps scanning for the next pack. Only a miss goes to the server.
+    const local = barcodeService.findLocal(code);
+    if (local) { addProduct(local); return; }
+
     setBusy(true);
     try {
-      const { product, globalProduct } = await barcodeService.lookupBarcode(code);
+      const { product, globalProduct, networkIssue } = await barcodeService.lookupBarcode(code);
       if (product) {
         addProduct(product);
       } else {
         Haptics.notificationAsync(Haptics.NotificationFeedbackType.Warning).catch(() => {});
-        setUnknown({ code, global: globalProduct });
+        setUnknown({ code, global: globalProduct, networkIssue });
         setCreating(false);
       }
     } catch {
-      setUnknown({ code, global: null });
+      setUnknown({ code, global: null, networkIssue: true });
     } finally {
       setBusy(false);
     }
@@ -149,6 +155,10 @@ export default function BarcodeScanSheet({ visible, onClose, onAdd }: Props) {
 
     const primary = type === 'ean13' || type === 'upc_a' || (numeric && (data.length === 13 || data.length === 12));
     if (primary) { commit(data, now); return; }
+
+    // The shop's own labels (DKN-XXXX-NNNNNN, Code 128) are a fixed, checksummed shape: one clean read is enough. They used to
+    // wait for a second matching read plus a 0.6 s timer, which is what made every loose-item label feel slow.
+    if (INTERNAL_BARCODE.test(data)) { commit(data.toUpperCase(), now); return; }
 
     const seen = (bufferRef.current.get(data) ?? 0) + 1;
     bufferRef.current.set(data, seen);
@@ -364,10 +374,14 @@ export default function BarcodeScanSheet({ visible, onClose, onAdd }: Props) {
               <View style={{ flexDirection: 'row', alignItems: 'center', gap: 10 }}>
                 <View style={styles.unknownIcon}><Ionicons name="help" size={22} color={POS.warning600} /></View>
                 <View style={{ flex: 1 }}>
-                  <Text style={styles.sheetTitle}>{g ? 'গ্লোবাল ক্যাটালগে আছে' : 'না-চেনা বারকোড'}</Text>
+                  <Text style={styles.sheetTitle}>{g ? 'গ্লোবাল ক্যাটালগে আছে' : unknown.networkIssue ? 'যাচাই করা যায়নি' : 'না-চেনা বারকোড'}</Text>
                   <Text style={styles.sheetCode}>{unknown.code}</Text>
                 </View>
               </View>
+
+              {unknown.networkIssue && !creating && (
+                <Text style={styles.sheetSub}>ইন্টারনেট ধীর বা নেই — পণ্যটি দোকানে থাকতে পারে। আবার স্ক্যান করুন; নতুন পণ্য হিসেবে যোগ করার আগে নিশ্চিত হয়ে নিন।</Text>
+              )}
 
               {g && !creating && (
                 <Text style={styles.sheetSub}>

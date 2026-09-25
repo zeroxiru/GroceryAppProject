@@ -9,6 +9,8 @@ import ProductListItem, { formatQty } from './ProductListItem';
 interface Props {
   products: Product[];
   category: string | null;
+  /** Brand filter inside the category (lower-cased, trimmed brand), or null for all brands. */
+  brand?: string | null;
   /** product_id → number of times sold today; anything sold today floats to the top. */
   salesCount: Record<string, number>;
   /** Space to leave under the last row so the floating bill bar never hides it. */
@@ -24,7 +26,7 @@ interface Props {
  * old "today's transactions" panel — the counter screen is for finding and
  * adding items, not reading history.
  */
-export default function ProductBrowseList({ products, category, salesCount, bottomInset, onAdd, onLoose }: Props) {
+export default function ProductBrowseList({ products, category, brand = null, salesCount, bottomInset, onAdd, onLoose }: Props) {
   const cart = useCartStore(s => s.activeCart());
   const [exactFor, setExactFor] = useState<Product | null>(null);
   const [exactText, setExactText] = useState('');
@@ -36,14 +38,15 @@ export default function ProductBrowseList({ products, category, salesCount, bott
   }, [cart]);
 
   const rows = useMemo(() => {
-    const list = category ? products.filter(p => p.category === category) : products;
+    let list = category ? products.filter(p => p.category === category) : products;
+    if (category && brand) list = list.filter(p => (p.brand ?? '').trim().toLowerCase() === brand);
     return [...list].sort((a, b) => {
       const sa = salesCount[a.id] ?? 0;
       const sb = salesCount[b.id] ?? 0;
       if (sa !== sb) return sb - sa;
       return (a.name_bangla || a.name_english || '').localeCompare(b.name_bangla || b.name_english || '');
     });
-  }, [products, category, salesCount]);
+  }, [products, category, brand, salesCount]);
 
   // Stable callbacks (read the store at call time) so memoised rows don't re-render on every cart change.
   const handleStep = useCallback((product: Product, direction: 1 | -1) => {

@@ -1,5 +1,6 @@
 import Fuse, { IFuseOptions } from 'fuse.js';
 import { Product } from '../../types';
+import { queryVariants } from './searchNormalize';
 
 /**
  * Shared product search index — the single Fuse.js config used everywhere a
@@ -59,9 +60,17 @@ export class ProductSearchIndex {
    * (category grid, recent, frequent) rather than dumping the whole catalog.
    */
   search(query: string, limit = 30): Product[] {
-    const q = query.trim();
-    if (!q) return [];
-    return this.fuse.search(q, { limit }).map(r => r.item);
+    const variants = queryVariants(query);
+    if (variants.length === 0) return [];
+    // Direct matches first, in Fuse's own ranking; matches found only through a spelling/digit variant are appended after.
+    const out: Product[] = [];
+    const seen = new Set<string>();
+    for (const v of variants) {
+      for (const r of this.fuse.search(v, { limit })) {
+        if (!seen.has(r.item.id)) { seen.add(r.item.id); out.push(r.item); }
+      }
+    }
+    return out.slice(0, limit);
   }
 
   /** Exact barcode/SKU match, ranked first by the search bar's own ordering rule. */

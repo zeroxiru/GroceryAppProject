@@ -2,6 +2,7 @@ import { billingApi, BillingPayload, BillingResponse, PaymentMethod, ServerBill 
 import { inventoryApi } from '../api/inventoryApi';
 import { Transaction, TransactionInput } from '../../types';
 import { useAuthStore, useTransactionStore, useProductStore } from '../../store';
+import { useSalesStatsStore } from '../../store/salesStats';
 import { OfflineError } from '../api/client';
 import { v4 as uuidv4 } from 'uuid';
 import { format, subDays } from 'date-fns';
@@ -176,6 +177,32 @@ export const transactionService = {
       }
       console.warn('fetchTodayTransactions error:', e);
       return useTransactionStore.getState().todayTransactions;
+    }
+  },
+
+  /**
+   * Rebuild the 30-day "what sells" numbers (PRD FR-4). At most once an hour unless forced; silently keeps the saved
+   * numbers when offline.
+   */
+  async refreshSalesStats(force = false): Promise<void> {
+    const st = useSalesStatsStore.getState();
+    if (!force && st.fetchedAt && Date.now() - new Date(st.fetchedAt).getTime() < 60 * 60 * 1000) return;
+    try {
+      const today = format(new Date(), 'yyyy-MM-dd');
+      const from = format(subDays(new Date(), 30), 'yyyy-MM-dd');
+      const bills = await billingApi.rangeBills(dayBefore(from), today);
+      const counts: Record<string, number> = {};
+      const lastSold: Record<string, string> = {};
+      for (const b of bills ?? []) {
+        if (b.is_voided || localDay(b.created_at) < from) continue;
+        for (const id of new Set((b.items ?? []).map(i => i.product_id).filter((x): x is string => !!x))) {
+          counts[id] = (counts[id] ?? 0) + 1;
+          if (!lastSold[id] || b.created_at > lastSold[id]) lastSold[id] = b.created_at;
+        }
+      }
+      useSalesStatsStore.getState().setStats(counts, lastSold);
+    } catch (e) {
+      if (!(e instanceof OfflineError)) console.warn('refreshSalesStats:', e);
     }
   },
 

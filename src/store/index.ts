@@ -4,6 +4,7 @@ import AsyncStorage from '@react-native-async-storage/async-storage';
 import { Shop, User, Product, Transaction, VoiceStatus, PaymentMethod, CatalogCategory, Unit } from '../types';
 import { BillingPayload } from '../services/api/billingApi';
 import { v4 as uuidv4 } from 'uuid';
+import { useSalesStatsStore } from './salesStats';
 
 interface AuthStore {
   shop: Shop | null;
@@ -261,16 +262,20 @@ function newCart(label: string, id?: string): Cart {
   };
 }
 
+const BN_DIGITS_STR = '০১২৩৪৫৬৭৮৯';
+const toBnDigits = (n: number) => String(n).replace(/[0-9]/g, d => BN_DIGITS_STR[Number(d)]);
+const fromBnDigits = (s: string) => s.replace(/[০-৯]/g, d => String(BN_DIGITS_STR.indexOf(d)));
+
 function nextCustomerLabel(carts: Cart[]): string {
-  // "কাস্টমার N" using the next number not already in use, so closing/reopening
-  // tabs doesn't collide with a still-open one.
+  // "কাস্টমার N" using the next number not already in use, so closing/reopening tabs doesn't collide with a
+  // still-open one. Numbers are read in either digit script (১ or 1) and written in Bangla digits, like the first tab.
   const used = new Set(
-    carts.map(c => { const m = c.label.match(/কাস্টমার (\d+)/); return m ? parseInt(m[1], 10) : null; })
+    carts.map(c => { const m = fromBnDigits(c.label).match(/কাস্টমার (\d+)/); return m ? parseInt(m[1], 10) : null; })
       .filter((n): n is number => n !== null)
   );
   let n = 1;
   while (used.has(n)) n++;
-  return `কাস্টমার ${n}`;
+  return `কাস্টমার ${toBnDigits(n)}`;
 }
 
 interface CartStore {
@@ -342,8 +347,20 @@ export const useCartStore = create<CartStore>()(
         const from = carts.find(c => c.id === fromId);
         const into = carts.find(c => c.id === intoId);
         if (!from || !into || fromId === intoId) return;
+        // Same product (same unit, and same price unless it is a weighed loose item) becomes ONE line with the summed
+        // quantity; loose lines are re-priced to a whole taka. Everything else is carried over as it is.
+        const items: CartItem[] = into.items.map(i => ({ ...i }));
+        for (const it of from.items) {
+          const at = it.product_id
+            ? items.findIndex(x => x.product_id === it.product_id && x.unit === it.unit && (it.unit === 'gram' || x.unit_price === it.unit_price))
+            : -1;
+          if (at === -1) { items.push({ ...it }); continue; }
+          const cur = items[at];
+          const withList: CartItem = { ...cur, list_unit_price: cur.list_unit_price ?? it.list_unit_price };
+          items[at] = { ...withList, ...repriceLine(withList, roundQty(cur.quantity + it.quantity)), checked: true };
+        }
         const merged = carts
-          .map(c => c.id === intoId ? { ...c, items: [...c.items, ...from.items] } : c)
+          .map(c => c.id === intoId ? { ...c, items } : c)
           .filter(c => c.id !== fromId);
         set({ carts: merged, activeCartId: activeCartId === fromId ? intoId : activeCartId });
       },
@@ -444,6 +461,7 @@ function onShopChanged(prevShopId: string | null, nextShopId: string): void {
   useTransactionStore.setState({ pendingBills: [], todayTransactions: [] });
   useProductStore.setState({ products: [], lastFetched: null });
   useCatalogStore.getState().clear();
+  useSalesStatsStore.getState().clear();
   useCartStore.setState({ carts: [newCart('কাস্টমার ১', 'cart-bootstrap')], activeCartId: 'cart-bootstrap' });
 
   AsyncStorage.getItem(PARKED_BILLS_KEY(nextShopId)).then((json) => {

@@ -11,39 +11,42 @@ import { FONT_SIZES } from '@/constants';
  * here; switching tabs is instant, no confirmation, no data loss.
  */
 export default function QueueTabs() {
-  const { carts, activeCartId, setActiveCart, addTab, closeTab, renameTab } = useCartStore();
+  const { carts, activeCartId, setActiveCart, addTab, closeTab, renameTab, mergeTabs } = useCartStore();
+  const [menuFor, setMenuFor] = useState<Cart | null>(null);
+  const [mergeFrom, setMergeFrom] = useState<Cart | null>(null);
   const [renaming, setRenaming] = useState<Cart | null>(null);
   const [renameText, setRenameText] = useState('');
 
   const cartTotal = (c: Cart) => cartTotals(c).net;
 
-  const handleLongPress = (cart: Cart) => {
-    const options: any[] = [
-      { text: 'নাম পরিবর্তন', onPress: () => { setRenaming(cart); setRenameText(cart.label); } },
-    ];
-    if (carts.length > 1) {
-      options.push({
-        text: 'বন্ধ করুন',
-        style: 'destructive',
-        onPress: () => {
-          if (cart.items.length > 0) {
-            Alert.alert(
-              'এই কাস্টমারের কার্টে পণ্য আছে',
-              `"${cart.label}"-এ ${cart.items.length}টি পণ্য আছে। বন্ধ করলে সব হারিয়ে যাবে।`,
-              [
-                { text: 'বাতিল', style: 'cancel' },
-                { text: 'হ্যাঁ, বন্ধ করুন', style: 'destructive', onPress: () => closeTab(cart.id) },
-              ],
-            );
-          } else {
-            closeTab(cart.id);
-          }
-        },
-      });
+  const closeCart = (cart: Cart) => {
+    if (cart.items.length > 0) {
+      Alert.alert(
+        'এই কাস্টমারের কার্টে পণ্য আছে',
+        `"${cart.label}"-এ ${cart.items.length}টি পণ্য আছে। বন্ধ করলে সব হারিয়ে যাবে।`,
+        [
+          { text: 'বাতিল', style: 'cancel' },
+          { text: 'হ্যাঁ, বন্ধ করুন', style: 'destructive', onPress: () => closeTab(cart.id) },
+        ],
+      );
+    } else {
+      closeTab(cart.id);
     }
-    options.push({ text: 'বাতিল', style: 'cancel' });
-    Alert.alert(cart.label, undefined, options);
   };
+
+  // Two customers who turn out to be one bill: pour this cart into another (same products add up into one line).
+  const mergeInto = (from: Cart, target: Cart) => {
+    Alert.alert(
+      'বিল মেলাবেন?',
+      `"${from.label}"-এর ${from.items.length}টি পণ্য "${target.label}"-এর সাথে মিলে যাবে। "${from.label}" বন্ধ হয়ে যাবে।`,
+      [
+        { text: 'না', style: 'cancel' },
+        { text: 'হ্যাঁ, মেলান', onPress: () => { mergeTabs(from.id, target.id); setMergeFrom(null); } },
+      ],
+    );
+  };
+
+  const handleLongPress = (cart: Cart) => setMenuFor(cart);
 
   const handleAddTab = () => {
     const id = addTab();
@@ -85,6 +88,54 @@ export default function QueueTabs() {
         </TouchableOpacity>
       </ScrollView>
 
+      {/* Long-press menu */}
+      <Modal visible={!!menuFor} transparent animationType="fade" onRequestClose={() => setMenuFor(null)}>
+        <TouchableOpacity style={styles.renameOverlay} activeOpacity={1} onPress={() => setMenuFor(null)}>
+          <View style={styles.renameCard}>
+            <Text style={styles.renameTitle}>{menuFor?.label}</Text>
+            <TouchableOpacity style={styles.menuRow} onPress={() => { const c = menuFor; setMenuFor(null); if (c) { setRenaming(c); setRenameText(c.label); } }}>
+              <Ionicons name="create-outline" size={20} color="#1F2937" />
+              <Text style={styles.menuTxt}>নাম পরিবর্তন</Text>
+            </TouchableOpacity>
+            {carts.length > 1 && (menuFor?.items.length ?? 0) > 0 && (
+              <TouchableOpacity style={styles.menuRow} onPress={() => { const c = menuFor; setMenuFor(null); setMergeFrom(c); }}>
+                <Ionicons name="git-merge-outline" size={20} color="#1F2937" />
+                <Text style={styles.menuTxt}>অন্য কাস্টমারের বিলের সাথে মেলান</Text>
+              </TouchableOpacity>
+            )}
+            {carts.length > 1 && (
+              <TouchableOpacity style={styles.menuRow} onPress={() => { const c = menuFor; setMenuFor(null); if (c) closeCart(c); }}>
+                <Ionicons name="close-circle-outline" size={20} color="#B91C1C" />
+                <Text style={[styles.menuTxt, { color: '#B91C1C' }]}>বন্ধ করুন</Text>
+              </TouchableOpacity>
+            )}
+            <TouchableOpacity style={[styles.menuRow, { justifyContent: 'center' }]} onPress={() => setMenuFor(null)}>
+              <Text style={[styles.menuTxt, { color: '#6B7280' }]}>বাতিল</Text>
+            </TouchableOpacity>
+          </View>
+        </TouchableOpacity>
+      </Modal>
+
+      {/* Merge target picker */}
+      <Modal visible={!!mergeFrom} transparent animationType="fade" onRequestClose={() => setMergeFrom(null)}>
+        <TouchableOpacity style={styles.renameOverlay} activeOpacity={1} onPress={() => setMergeFrom(null)}>
+          <View style={styles.renameCard}>
+            <Text style={styles.renameTitle}>"{mergeFrom?.label}" কার সাথে মিলবে?</Text>
+            {carts.filter(c => c.id !== mergeFrom?.id).map(c => (
+              <TouchableOpacity key={c.id} style={styles.menuRow} onPress={() => mergeFrom && mergeInto(mergeFrom, c)}>
+                <Ionicons name="arrow-forward-circle-outline" size={20} color="#1F2937" />
+                <Text style={styles.menuTxt} numberOfLines={1}>
+                  {c.label}{c.items.length > 0 ? ` · ৳${Math.round(cartTotal(c))}` : ' · খালি'}
+                </Text>
+              </TouchableOpacity>
+            ))}
+            <TouchableOpacity style={[styles.menuRow, { justifyContent: 'center' }]} onPress={() => setMergeFrom(null)}>
+              <Text style={[styles.menuTxt, { color: '#6B7280' }]}>বাতিল</Text>
+            </TouchableOpacity>
+          </View>
+        </TouchableOpacity>
+      </Modal>
+
       <Modal visible={!!renaming} transparent animationType="fade" onRequestClose={() => setRenaming(null)}>
         <View style={styles.renameOverlay}>
           <View style={styles.renameCard}>
@@ -118,6 +169,8 @@ export default function QueueTabs() {
 }
 
 const styles = StyleSheet.create({
+  menuRow: { flexDirection: 'row', alignItems: 'center', gap: 12, paddingVertical: 14, paddingHorizontal: 4 },
+  menuTxt: { fontSize: FONT_SIZES.md, color: '#1F2937', fontWeight: '600', flexShrink: 1 },
   wrap: { paddingHorizontal: 16, marginTop: 10 },
   tab: {
     flexDirection: 'row', alignItems: 'center',

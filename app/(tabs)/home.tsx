@@ -28,6 +28,8 @@ import CategoryChipRail, { RailCategory } from '@/components/pos/CategoryChipRai
 import ProductBrowseList from '@/components/pos/ProductBrowseList';
 import BarcodeScanSheet from '@/components/pos/BarcodeScanSheet';
 import LooseQuantitySheet from '@/components/pos/LooseQuantitySheet';
+import BrandChipRail, { BrandChip } from '@/components/pos/BrandChipRail';
+import { useSalesStatsStore } from '@/store/salesStats';
 import DropdownSelect from '@/components/common/DropdownSelect';
 import { unitOptions } from '@/constants/unitOptions';
 import { isLoose, formatWeight } from '@/utils/looseUnits';
@@ -111,6 +113,7 @@ useEffect(() => {
     useTransactionStore.getState().setTodayTransactions(todayOnly);
   }
   transactionService.fetchTodayTransactions().catch(console.warn);
+  transactionService.refreshSalesStats().catch(console.warn);
   productService.fetchProducts().catch(console.warn);
 }, []);
 
@@ -133,9 +136,13 @@ useEffect(() => {
   // only from data already loaded (today's transactions + product cache), no
   // new API call. Scoped to today only; a multi-day window would need a
   // separate fetch, deliberately not added here.
+  const statCounts = useSalesStatsStore(s => s.counts);
+  const statLastSold = useSalesStatsStore(s => s.lastSold);
+  const hasStats = Object.keys(statCounts).length > 0;
   const frequentProducts = React.useMemo(() => {
-    const counts: Record<string, number> = {};
-    (todayTransactions ?? []).forEach(t => {
+    // Last 30 days (persisted, refreshed hourly). Until the first refresh has ever happened, fall back to today's sales.
+    const counts: Record<string, number> = hasStats ? { ...statCounts } : {};
+    if (!hasStats) (todayTransactions ?? []).forEach(t => {
       if (t?.type === 'sale' && t.product_id) counts[t.product_id] = (counts[t.product_id] ?? 0) + 1;
     });
     return Object.entries(counts)
@@ -143,11 +150,19 @@ useEffect(() => {
       .map(([id]) => products.find(p => p.id === id))
       .filter((p): p is NonNullable<typeof p> => !!p)
       .slice(0, 8);
-  }, [todayTransactions, products]);
+  }, [todayTransactions, products, statCounts, hasStats]);
 
   const recentProducts = React.useMemo(() => {
     const seen = new Set<string>();
     const out: typeof products = [];
+    if (hasStats) {
+      const byId = new Map(products.map(p => [p.id, p] as const));
+      return Object.entries(statLastSold)
+        .sort((a, b) => (a[1] < b[1] ? 1 : -1))
+        .map(([id]) => byId.get(id))
+        .filter((p): p is NonNullable<typeof p> => !!p)
+        .slice(0, 8);
+    }
     for (const t of todayTransactions ?? []) {
       if (t?.type !== 'sale' || !t.product_id || seen.has(t.product_id)) continue;
       const p = products.find(pp => pp.id === t.product_id);
@@ -157,7 +172,7 @@ useEffect(() => {
       if (out.length >= 8) break;
     }
     return out;
-  }, [todayTransactions, products]);
+  }, [todayTransactions, products, statLastSold, hasStats]);
 
   const todaySales = (todayTransactions ?? []).filter(t => t.type === 'sale').reduce((s, t) => s + (t?.total_amount ?? 0), 0);
 
@@ -217,6 +232,7 @@ useEffect(() => {
   }) => {
     setLastInvoice(invoice);
     setInvoiceModalVisible(true);
+    useSalesStatsStore.getState().recordSale(invoice.items.map(i => i.product_id).filter((x): x is string => !!x));
   };
 
   const handleUnmatchedProduct = (item: CartItem) => {
@@ -282,6 +298,25 @@ useEffect(() => {
           ?? key.replace(/_/g, ' '),
       }));
   }, [activeProducts, catalogCategories]);
+
+  // Brand filter inside the chosen category. Brands are grouped ignoring case and stray spaces ("Dettol" = "dettol ").
+  // Shown only when the category has two or more brands; changing category clears it.
+  const [selectedBrand, setSelectedBrand] = useState<string | null>(null);
+  useEffect(() => { setSelectedBrand(null); }, [selectedCategory]);
+  const brandChips = React.useMemo<BrandChip[]>(() => {
+    if (!selectedCategory) return [];
+    const m = new Map<string, BrandChip>();
+    for (const p of activeProducts) {
+      if (p.category !== selectedCategory) continue;
+      const b = (p.brand ?? '').trim();
+      if (!b) continue;
+      const key = b.toLowerCase();
+      const cur = m.get(key);
+      if (cur) cur.count++; else m.set(key, { key, label: b, count: 1 });
+    }
+    const list = [...m.values()].sort((a, b) => b.count - a.count || a.label.localeCompare(b.label));
+    return list.length >= 2 ? list.slice(0, 24) : [];
+  }, [activeProducts, selectedCategory]);
 
   // Anything sold today floats to the top of the list.
   const salesCount = React.useMemo(() => {
@@ -450,9 +485,11 @@ useEffect(() => {
           onSelect={setSelectedCategory}
           totalCount={activeProducts.length}
         />
+        <BrandChipRail brands={brandChips} selected={selectedBrand} onSelect={setSelectedBrand} />
         <ProductBrowseList
           products={activeProducts}
           category={selectedCategory}
+          brand={selectedBrand}
           salesCount={salesCount}
           bottomInset={activeCart.items.length > 0 ? 110 : 24}
           onAdd={handleListAdd}

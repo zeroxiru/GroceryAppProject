@@ -15,6 +15,7 @@ import { useProductStore } from '@/store';
 import { barcodeService } from '@/services/barcode/barcodeService';
 import { productService } from '@/services/supabase/productService';
 import { productApi } from '@/services/api/productApi';
+import { playScanBeep, preloadScanBeep } from '@/utils/scanBeep';
 import { ProductSearchIndex } from '@/services/search/productSearch';
 import { POS } from '@/constants/posTokens';
 import { FONT_SIZES } from '@/constants';
@@ -75,6 +76,7 @@ export default function BarcodeScanSheet({ visible, onClose, onAdd }: Props) {
     setCount(0); setAdded(null); setUnknown(null); setCreating(false); setLinking(false); setFormError('');
     setManualOpen(false); setManualText(''); setTorch(false);
     lastCodeRef.current = ''; lastSeenRef.current = 0; bufferRef.current.clear();
+    preloadScanBeep();
     Camera.requestCameraPermissionsAsync().then(r => setPerm(r.status === 'granted')).catch(() => setPerm(false));
   }, [visible]);
 
@@ -97,6 +99,7 @@ export default function BarcodeScanSheet({ visible, onClose, onAdd }: Props) {
   const addProduct = (product: Product) => {
     onAdd(product);
     Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success).catch(() => {});
+    playScanBeep();
     setCount(c => c + 1);
     setFlash(true);
     setTimeout(() => setFlash(false), 260);

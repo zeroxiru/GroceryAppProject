@@ -34,7 +34,7 @@ const FRAME_H = 170;
 const UNITS: Unit[] = ['piece', 'kg', 'gram', 'litre', 'ml', 'dozen', 'packet'];
 
 type Unknown = { code: string; global: GlobalProduct | null; networkIssue?: boolean };
-type Added = { key: number; name: string; price: number; outOfStock: boolean };
+type Added = { key: number; name: string; price: number; outOfStock: boolean; ms?: number; path?: 'local' | 'server' };
 
 /**
  * The scanner as an overlay on /pos (PRD FR-7–FR-9, design system's
@@ -61,6 +61,7 @@ export default function BarcodeScanSheet({ visible, onClose, onAdd }: Props) {
   const [manualText, setManualText] = useState('');
 
   // Repeat-scan guard: the same barcode counts again only after it has left the camera's view.
+  const firstSeenRef = useRef<Map<string, number>>(new Map());   // code -> when the camera FIRST decoded it (start of the stopwatch)
   const lastCodeRef = useRef('');
   const lastSeenRef = useRef(0);
   // Shorter / non-EAN formats (EAN-8, UPC-E, Code128 incl. the shop's own labels) need 2 consistent reads.
@@ -76,7 +77,7 @@ export default function BarcodeScanSheet({ visible, onClose, onAdd }: Props) {
     if (!visible) return;
     setCount(0); setAdded(null); setUnknown(null); setCreating(false); setLinking(false); setFormError('');
     setManualOpen(false); setManualText(''); setTorch(false);
-    lastCodeRef.current = ''; lastSeenRef.current = 0; bufferRef.current.clear();
+    lastCodeRef.current = ''; lastSeenRef.current = 0; bufferRef.current.clear(); firstSeenRef.current.clear();
     preloadScanBeep();
     Camera.requestCameraPermissionsAsync().then(r => setPerm(r.status === 'granted')).catch(() => setPerm(false));
   }, [visible]);
@@ -97,7 +98,7 @@ export default function BarcodeScanSheet({ visible, onClose, onAdd }: Props) {
     if (addedTimerRef.current) clearTimeout(addedTimerRef.current);
   }, []);
 
-  const addProduct = (product: Product) => {
+  const addProduct = (product: Product, timing?: { ms: number; path: 'local' | 'server' }) => {
     onAdd(product);
     Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success).catch(() => {});
     playScanBeep();
@@ -109,28 +110,43 @@ export default function BarcodeScanSheet({ visible, onClose, onAdd }: Props) {
       name: product.name_bangla || product.name_english || '',
       price: product.sale_price,
       outOfStock: Number(product.current_stock ?? 0) <= 0,
+      ms: timing?.ms,
+      path: timing?.path,
     });
     if (addedTimerRef.current) clearTimeout(addedTimerRef.current);
     addedTimerRef.current = setTimeout(() => setAdded(null), 2600);
   };
 
   const processCode = async (code: string) => {
+    // Stopwatch: from the first frame that decoded this code to the item being on the bill. The scan log line is visible
+    // in `adb logcat -s ReactNativeJS` and the number is shown on screen so speed can be checked without a laptop.
+    const t0 = firstSeenRef.current.get(code) ?? Date.now();
+    firstSeenRef.current.delete(code);
+    const done = (path: 'local' | 'server' | 'unknown' | 'network', extra = '') => {
+      const ms = Date.now() - t0;
+      console.log(`[SCAN] ${code} path=${path} total=${ms}ms${extra}`);
+      return ms;
+    };
+
     // The phone already holds the whole product list: answer from it immediately — no spinner, no waiting, and the camera
     // keeps scanning for the next pack. Only a miss goes to the server.
     const local = barcodeService.findLocal(code);
-    if (local) { addProduct(local); return; }
+    if (local) { addProduct(local, { ms: done('local'), path: 'local' }); return; }
 
     setBusy(true);
+    const tLookup = Date.now();
     try {
       const { product, globalProduct, networkIssue } = await barcodeService.lookupBarcode(code);
       if (product) {
-        addProduct(product);
+        addProduct(product, { ms: done('server', ` lookup=${Date.now() - tLookup}ms`), path: 'server' });
       } else {
+        done(networkIssue ? 'network' : 'unknown', ` lookup=${Date.now() - tLookup}ms`);
         Haptics.notificationAsync(Haptics.NotificationFeedbackType.Warning).catch(() => {});
         setUnknown({ code, global: globalProduct, networkIssue });
-        setCreating(false);
+        if (networkIssue) setCreating(false); else openCreate(globalProduct);   // unreachable server: ask first, don't invite a duplicate
       }
     } catch {
+      done('network', ` lookup=${Date.now() - tLookup}ms (error)`);
       setUnknown({ code, global: null, networkIssue: true });
     } finally {
       setBusy(false);
@@ -152,6 +168,7 @@ export default function BarcodeScanSheet({ visible, onClose, onAdd }: Props) {
 
     // Still in front of the camera from the last scan — keep it "seen" but don't count it again.
     if (data === lastCodeRef.current && now - lastSeenRef.current < 800) { lastSeenRef.current = now; return; }
+    if (!firstSeenRef.current.has(data)) firstSeenRef.current.set(data, now);   // stopwatch starts at the first NEW decode
 
     const primary = type === 'ean13' || type === 'upc_a' || (numeric && (data.length === 13 || data.length === 12));
     if (primary) { commit(data, now); return; }
@@ -177,8 +194,9 @@ export default function BarcodeScanSheet({ visible, onClose, onAdd }: Props) {
     lastCodeRef.current = ''; // the same code may be scanned again, e.g. after fixing the label
   };
 
-  const startCreate = () => {
-    const g = unknown?.global;
+  // Opens the new-product form. A barcode the shop has never seen goes STRAIGHT here (no extra "add new product" tap), with
+  // the name / price / unit already filled in when it is in the global catalogue, so a new item is: scan, type the price, done.
+  const openCreate = (g: GlobalProduct | null) => {
     setForm({
       name: g ? (g.name_bangla || g.name_english || '') : '',
       price: g ? String(g.standard_mrp || g.standard_price || '') : '',
@@ -187,6 +205,7 @@ export default function BarcodeScanSheet({ visible, onClose, onAdd }: Props) {
     setFormError('');
     setCreating(true);
   };
+  const startCreate = () => openCreate(unknown?.global ?? null);
 
   const submitCreate = async () => {
     if (!unknown) return;
@@ -352,6 +371,9 @@ export default function BarcodeScanSheet({ visible, onClose, onAdd }: Props) {
                   <Text style={styles.addedName} numberOfLines={1}>{added.name}</Text>
                   {added.outOfStock && <Text style={styles.addedWarn}>স্টকে নেই — বিল করলে ব্যর্থ হতে পারে</Text>}
                 </View>
+                {added.ms != null && (
+                  <Text style={styles.addedMs}>{added.path === 'local' ? '⚡' : '🌐'} {added.ms < 1000 ? `${added.ms}ms` : `${(added.ms / 1000).toFixed(1)}s`}</Text>
+                )}
                 <Text style={styles.addedPrice}>৳{added.price}</Text>
               </View>
             )}
@@ -548,6 +570,7 @@ const styles = StyleSheet.create({
   sheetSub: { fontSize: FONT_SIZES.sm, color: POS.ink600 },
   label: { fontSize: FONT_SIZES.sm, fontWeight: '600', color: POS.ink900, marginTop: 4 },
   input: { borderWidth: 1.5, borderColor: POS.border600, borderRadius: 12, height: 50, paddingHorizontal: 14, fontSize: FONT_SIZES.md, color: POS.ink900, backgroundColor: '#fff' },
+  addedMs: { fontSize: 12, fontWeight: '700', color: POS.ink600, marginRight: 8 },
   linkBtn: { flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 8, paddingVertical: 13, borderRadius: 14, borderWidth: 1.5, borderColor: POS.brand600 },
   linkBtnTxt: { color: POS.brand600, fontSize: FONT_SIZES.sm, fontWeight: '700', flexShrink: 1, textAlign: 'center' },
   linkRow: { paddingVertical: 12, paddingHorizontal: 14, borderRadius: 12, borderWidth: 1, borderColor: POS.border200, backgroundColor: '#fff' },
